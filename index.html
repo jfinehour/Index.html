@@ -1,0 +1,1395 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Gridlock — DFS Lineup Builder</title>
+<style>
+/* ============================================================
+   GRIDLOCK — DFS Lineup Builder
+   Design: stadium scoreboard at night. Deep turf-charcoal field,
+   amber scoreboard glow for actions, turf green + dusk blue as
+   informational badges (stack / bring-back), never decoration.
+   ============================================================ */
+
+:root {
+  --bg: #101915;
+  --bg-panel: #172420;
+  --bg-panel-raised: #1D2E28;
+  --line: #2B3F36;
+  --line-soft: #223129;
+  --text: #ECE7D8;
+  --text-dim: #8FA396;
+  --text-faint: #5F7267;
+  --amber: #D9A441;
+  --amber-dim: #8A6A2E;
+  --turf: #4C9563;
+  --turf-dim: #2E4F3A;
+  --dusk: #4C86A6;
+  --dusk-dim: #2C4A5A;
+  --rust: #BD5238;
+  --radius: 3px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection { background: var(--amber-dim); color: var(--text); }
+
+.app { max-width: 900px; margin: 0 auto; padding-bottom: 96px; }
+
+/* ---------- Header ---------- */
+header.hero {
+  padding: 22px 16px 16px;
+  border-bottom: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(217,164,65,0.06), transparent 60%),
+    var(--bg);
+}
+.hero-title {
+  font-family: "Arial Narrow", Arial, sans-serif;
+  font-weight: 700;
+  font-size: 34px;
+  letter-spacing: 0.5px;
+  margin: 0;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.hero-title .dot { color: var(--amber); }
+.hero-sub {
+  margin: 4px 0 0;
+  color: var(--text-dim);
+  font-size: 13.5px;
+}
+
+/* ---------- File upload ---------- */
+.upload-row {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.file-btn {
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 11px 16px;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+}
+.file-btn:active { background: var(--line-soft); }
+#fileInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.file-status {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.file-status.ok { color: var(--turf); }
+.file-status.err { color: var(--rust); }
+
+.paste-toggle {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 12px;
+  margin-top: 10px;
+  padding: 6px 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.paste-area { margin-top: 8px; }
+.paste-area textarea {
+  width: 100%;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 10px;
+  font-size: 12px;
+  font-family: monospace;
+  resize: vertical;
+}
+
+/* ---------- Tuning panel ---------- */
+.panel {
+  margin: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+.panel-toggle {
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 14px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  min-height: 44px;
+}
+.panel-toggle .chev { color: var(--text-dim); transition: transform 0.15s ease; font-size: 12px; }
+.panel-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.panel-body {
+  padding: 4px 16px 16px;
+  display: none;
+  border-top: 1px solid var(--line-soft);
+}
+.panel-body.open { display: block; }
+
+.slider-group { margin-top: 16px; }
+.slider-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.slider-label b { color: var(--text); font-weight: 600; }
+.slider-label .val { color: var(--amber); font-variant-numeric: tabular-nums; }
+input[type="range"] {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 32px;
+  background: transparent;
+  margin: 0;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: var(--line);
+  border-radius: 2px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -9px;
+  border-radius: 50%;
+  background: var(--amber);
+  border: 2px solid var(--bg);
+}
+input[type="range"]::-moz-range-track { height: 4px; background: var(--line); border-radius: 2px; }
+input[type="range"]::-moz-range-thumb {
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--amber); border: 2px solid var(--bg);
+}
+.slider-note { font-size: 12px; color: var(--text-faint); margin-top: 4px; }
+
+.toggle-group { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+.toggle-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+.toggle-row b { color: var(--text); font-size: 13px; font-weight: 600; }
+#toggleTEFlex {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--amber);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.team-chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.team-chip {
+  border: 1px solid var(--line);
+  background: var(--bg-panel-raised);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  min-height: 36px;
+}
+.team-chip.selected {
+  background: var(--amber-dim);
+  border-color: var(--amber);
+  color: #FCEFD4;
+}
+.team-chip:active { opacity: 0.8; }
+.chip-clear-btn {
+  background: none;
+  border: none;
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 6px;
+  margin-left: 4px;
+}
+
+/* ---------- Tabs ---------- */
+.tabbar {
+  display: flex;
+  gap: 2px;
+  margin: 0 16px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.tabbar::-webkit-scrollbar { display: none; }
+.tab {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  padding: 12px 14px;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  min-height: 44px;
+}
+.tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+.tab .count {
+  color: var(--text-faint);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+.tab.active .count { color: var(--amber-dim); }
+
+/* ---------- Content ---------- */
+.content { padding: 16px; }
+.empty-state {
+  text-align: center;
+  color: var(--text-dim);
+  padding: 60px 20px;
+  font-size: 14px;
+}
+.empty-state .big { font-size: 15px; color: var(--text); margin-bottom: 6px; font-weight: 600; }
+
+.lineup-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+.lineup-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--bg-panel-raised);
+  border-bottom: 1px solid var(--line-soft);
+}
+.lineup-head .num {
+  font-family: "Arial Narrow", Arial, sans-serif;
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--text);
+}
+.lineup-head .badges { display: flex; gap: 6px; }
+.badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 3px 7px;
+  border-radius: 2px;
+  letter-spacing: 0.3px;
+}
+.badge.stack { background: var(--turf-dim); color: #B9E3C4; }
+.badge.bringback { background: var(--dusk-dim); color: #BFE0EE; }
+
+table.lineup-table {
+  width: 100%;
+  min-width: 480px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.lineup-table th {
+  text-align: left;
+  color: var(--text-faint);
+  font-weight: 600;
+  font-size: 10.5px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line-soft);
+}
+table.lineup-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+table.lineup-table tr:last-child td { border-bottom: none; }
+table.lineup-table td.num { text-align: right; }
+table.lineup-table td.slot {
+  font-weight: 700;
+  color: var(--text-dim);
+  font-size: 11px;
+  width: 34px;
+}
+table.lineup-table tr.stack-row td.slot { color: var(--turf); }
+table.lineup-table tr.bringback-row td.slot { color: var(--dusk); }
+tr.totals-row td {
+  font-weight: 700;
+  background: var(--bg-panel-raised);
+  border-top: 1px solid var(--line);
+  border-bottom: none !important;
+  color: var(--amber);
+}
+tr.totals-row td.label { color: var(--text-dim); font-weight: 600; }
+
+/* ---------- Exposure tab ---------- */
+table.exposure-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.exposure-table th {
+  text-align: left; color: var(--text-faint); font-size: 11px; font-weight: 600;
+  padding: 8px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; background: var(--bg);
+}
+table.exposure-table td { padding: 8px; border-bottom: 1px solid var(--line-soft); font-variant-numeric: tabular-nums; }
+table.exposure-table td.num { text-align: right; }
+.exp-bar-bg { background: var(--line-soft); border-radius: 2px; height: 6px; width: 60px; overflow: hidden; display: inline-block; vertical-align: middle; }
+.exp-bar-fill { background: var(--amber); height: 100%; }
+
+/* ---------- Sticky action bar ---------- */
+.action-bar {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--line);
+  padding: 10px 16px;
+  display: flex;
+  gap: 10px;
+  z-index: 10;
+}
+.btn {
+  flex: 1;
+  border: none;
+  border-radius: var(--radius);
+  padding: 13px 14px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  min-height: 48px;
+}
+.btn-primary { background: var(--amber); color: #241A05; }
+.btn-primary:active { background: #C79636; }
+.btn-primary:disabled { background: var(--amber-dim); color: #3a2f13; cursor: default; }
+.btn-secondary { background: var(--bg-panel-raised); color: var(--text); border: 1px solid var(--line); }
+.btn-secondary:active { background: var(--line-soft); }
+.btn-secondary:disabled { color: var(--text-faint); cursor: default; }
+
+.status-line {
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  padding: 6px 16px 0;
+  min-height: 18px;
+}
+.status-line.err { color: var(--rust); }
+
+@media (min-width: 640px) {
+  .lineup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .lineup-grid .lineup-card { margin-bottom: 0; }
+}
+
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="hero">
+    <h1 class="hero-title">GRIDLOCK<span class="dot">.</span></h1>
+    <p class="hero-sub">DFS lineup builder — Projection, Ceiling &amp; GPP correlation, all on-device.</p>
+    <div class="upload-row">
+      <label class="file-btn" for="fileInput">Load projections CSV</label>
+      <input type="file" id="fileInput" accept=".csv,text/csv,text/comma-separated-values,text/plain,application/vnd.ms-excel,application/csv">
+      <span class="file-status" id="fileStatus">No file loaded yet</span>
+    </div>
+    <button type="button" class="paste-toggle" id="pasteToggle">Trouble picking a file? Paste CSV text instead ▾</button>
+    <div class="paste-area" id="pasteArea" style="display:none;">
+      <textarea id="pasteText" placeholder="Paste the full CSV content here, including the header row" rows="4"></textarea>
+      <button type="button" class="file-btn" id="pasteLoadBtn" style="margin-top:8px;">Load pasted data</button>
+    </div>
+  </header>
+
+  <div class="panel">
+    <button class="panel-toggle" id="panelToggle" aria-expanded="false">
+      <span>Tuning — ownership fade, bring-backs, exposure</span>
+      <span class="chev">▶</span>
+    </button>
+    <div class="panel-body" id="panelBody">
+
+      <div class="slider-group">
+        <div class="slider-label"><b>Small Field ownership fade</b><span class="val" id="valSmallOwn">20%</span></div>
+        <input type="range" id="sliderSmallOwn" min="0" max="100" value="20">
+        <div class="slider-note">Higher = discounts high-owned Small Field chalk more when scoring ceiling leverage.</div>
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label"><b>Large Field ownership fade</b><span class="val" id="valLargeOwn">55%</span></div>
+        <input type="range" id="sliderLargeOwn" min="0" max="100" value="55">
+        <div class="slider-note">Large-field GPPs reward differentiation — default fades chalk harder than Small Field.</div>
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label"><b>Bring-back rate</b><span class="val" id="valBringback">50%</span></div>
+        <input type="range" id="sliderBringback" min="0" max="100" value="50">
+        <div class="slider-note">Share of GPP lineups that also roster a player from the QB's opponent (game stack).</div>
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label"><b>Max exposure per player</b><span class="val" id="valExposure">40%</span></div>
+        <input type="range" id="sliderExposure" min="10" max="100" value="40">
+        <div class="slider-note">Soft cap on how many of the 20 lineups (per bucket) a single player can appear in. Relaxed automatically if the slate doesn't support it at full quality.</div>
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label"><b>Lineups per GPP bucket</b><span class="val" id="valGppCount">20</span></div>
+        <input type="range" id="sliderGppCount" min="5" max="50" value="20" step="5">
+        <div class="slider-note">Applies to both Small Field and Large Field buckets.</div>
+      </div>
+
+      <div class="slider-group toggle-group">
+        <label class="toggle-row" for="toggleTEFlex">
+          <span><b>Allow TE in FLEX</b><div class="slider-note" style="margin-top:2px;">Unchecked keeps FLEX to RB/WR only (no double-TE lineups).</div></span>
+          <input type="checkbox" id="toggleTEFlex" checked>
+        </label>
+      </div>
+
+      <div class="slider-group toggle-group" id="teamPickerGroup" style="display:none;">
+        <div class="slider-label" style="margin-bottom:10px;">
+          <b>Stack team(s)</b>
+          <span><span class="val" id="teamPickerCount">All teams</span> <button type="button" id="teamPickerClear" class="chip-clear-btn">Clear</button></span>
+        </div>
+        <div class="slider-note" style="margin-bottom:10px;">Restricts the QB (and stack) in Small Field &amp; Large Field lineups to the selected team(s). Leave none selected to allow any team.</div>
+        <div class="team-chip-grid" id="teamChipGrid"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="tabbar" id="tabbar">
+    <button class="tab active" data-tab="proj">Projection <span class="count">·10</span></button>
+    <button class="tab" data-tab="ceil">Ceiling <span class="count">·5</span></button>
+    <button class="tab" data-tab="small">Small Field <span class="count" id="tabCountSmall">·20</span></button>
+    <button class="tab" data-tab="large">Large Field <span class="count" id="tabCountLarge">·20</span></button>
+    <button class="tab" data-tab="exposure">Exposure</button>
+  </div>
+
+  <div class="content" id="content">
+    <div class="empty-state">
+      <div class="big">Load your projections CSV to get started</div>
+      Then tap Generate Lineups below.
+    </div>
+  </div>
+
+  <div class="status-line" id="statusLine"></div>
+
+</div>
+
+<div class="action-bar">
+  <button class="btn btn-secondary" id="exportBtn" disabled>Export CSV</button>
+  <button class="btn btn-primary" id="generateBtn" disabled>Generate Lineups</button>
+</div>
+
+<script>
+/* =====================================================================
+   DFS Lineup Optimization Engine (pure JS, no dependencies)
+   Works in-browser (window.DFSEngine) or in Node (module.exports) for testing.
+   ===================================================================== */
+
+const SALARY_CAP = 50000;
+const ROSTER_SLOTS = { QB: 1, RB: 2, WR: 3, TE: 1, DST: 1 }; // + 1 FLEX
+const FLEX_ELIGIBLE = new Set(["RB", "WR", "TE"]);
+
+const COLUMN_ALIASES = {
+  name: ["name", "player", "player name"],
+  team: ["team"],
+  opp: ["opponent", "opp"],
+  position: ["position", "dk pos", "pos", "roster position"],
+  salary: ["salary", "dk salary"],
+  proj: ["projection", "dk proj", "proj", "median"],
+  own: ["ownership", "small field", "own%", "ownership%"],
+  ownLarge: ["large field"],
+  floor: ["floor", "dk floor"],
+  ceiling: ["ceiling", "dk ceiling"],
+};
+
+function cleanNumber(v) {
+  if (typeof v === "number") return v;
+  return parseFloat(String(v).replace(/[$,%]/g, "").trim());
+}
+
+// Minimal RFC4180-ish CSV parser (handles quoted fields with commas/newlines)
+function parseCSV(text) {
+  text = text.replace(/^\uFEFF/, ""); // strip BOM
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ",") { row.push(field); field = ""; }
+      else if (c === "\n" || c === "\r") {
+        if (c === "\r" && text[i + 1] === "\n") i++;
+        row.push(field); field = "";
+        if (row.length > 1 || row[0] !== "") rows.push(row);
+        row = [];
+      } else field += c;
+    }
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function resolveColumns(headerRow) {
+  const lower = headerRow.map(h => h.trim().toLowerCase());
+  const colmap = {};
+  for (const [logical, aliases] of Object.entries(COLUMN_ALIASES)) {
+    let idx = -1;
+    for (const alias of aliases) {
+      idx = lower.indexOf(alias);
+      if (idx !== -1) break;
+    }
+    colmap[logical] = idx; // may be -1 if optional (ownLarge)
+  }
+  const required = ["name", "team", "opp", "position", "salary", "proj", "own", "floor", "ceiling"];
+  for (const r of required) {
+    if (colmap[r] === -1 || colmap[r] === undefined) {
+      throw new Error(`Could not find a column for "${r}" in header: ${headerRow.join(", ")}`);
+    }
+  }
+  return colmap;
+}
+
+function loadPlayers(csvText) {
+  const rows = parseCSV(csvText);
+  const header = rows[0];
+  const colmap = resolveColumns(header);
+  const players = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || r.every(x => x === "")) continue;
+    const p = {
+      id: i - 1,
+      name: r[colmap.name].trim(),
+      team: r[colmap.team].trim(),
+      opp: r[colmap.opp].trim(),
+      position: r[colmap.position].trim().toUpperCase(),
+      salary: cleanNumber(r[colmap.salary]),
+      proj: cleanNumber(r[colmap.proj]),
+      own: cleanNumber(r[colmap.own]),
+      floor: cleanNumber(r[colmap.floor]),
+      ceiling: cleanNumber(r[colmap.ceiling]),
+    };
+    if (colmap.ownLarge !== -1 && colmap.ownLarge !== undefined) {
+      p.ownLarge = cleanNumber(r[colmap.ownLarge]);
+    }
+    if (!p.name || isNaN(p.salary) || isNaN(p.proj)) continue;
+    players.push(p);
+  }
+  return players;
+}
+
+/* ---------------------- Lineup construction ---------------------- */
+
+function oppTeam(p) { return p.opp.replace("@", "").trim(); }
+
+function emptySlots() {
+  return { QB: [], RB: [], WR: [], TE: [], DST: [], FLEX: [] };
+}
+
+function lineupArray(slots) {
+  return [...slots.QB, ...slots.RB, ...slots.WR, ...slots.TE, ...slots.FLEX, ...slots.DST];
+}
+
+function lineupSalary(arr) { return arr.reduce((s, p) => s + p.salary, 0); }
+function lineupScore(arr, scoreFn) { return arr.reduce((s, p) => s + scoreFn(p), 0); }
+
+function signature(arr) { return arr.map(p => p.id).sort((a, b) => a - b).join(","); }
+
+// Rough remaining-slot count helper for salary-budget feasibility checks
+function remainingSlotsAfter(filledCounts) {
+  const need = { QB: 1, RB: 2, WR: 3, TE: 1, DST: 1 };
+  let total = 0;
+  for (const k of Object.keys(need)) total += Math.max(0, need[k] - (filledCounts[k] || 0));
+  total += Math.max(0, 1 - (filledCounts.FLEX || 0));
+  return total;
+}
+
+function pickWeighted(candidates, rng, topK = 5) {
+  // candidates already sorted desc by weightedScore; sample from top slice
+  const k = Math.min(candidates.length, topK);
+  const idx = Math.floor(rng() * k);
+  return candidates[idx];
+}
+
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Attempts to build one valid lineup.
+ * opts:
+ *   scoreFn(player) -> number      required
+ *   rng() -> [0,1)                 required
+ *   noise: float (0-1)             randomization strength on scores
+ *   requireStack: bool             QB + >=1 same-team WR/TE
+ *   requireBringBack: bool         + >=1 player from QB's opponent team
+ *   exposure: Map(name->count)     running usage across a batch
+ *   maxExposure: number|null       skip player (soft) once count reaches this
+ */
+function buildOneLineup(pool, opts) {
+  const { scoreFn, rng, noise = 0.15, requireStack = false, requireBringBack = false,
+          exposure = new Map(), maxExposure = null, topK = 5,
+          flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null } = opts;
+
+  const byPos = { QB: [], RB: [], WR: [], TE: [], DST: [] };
+  for (const p of pool) if (byPos[p.position]) byPos[p.position].push(p);
+  const qbPool = qbTeamFilter ? byPos.QB.filter(p => qbTeamFilter.has(p.team)) : byPos.QB;
+
+  const used = new Set();
+  const slots = emptySlots();
+  let salaryLeft = SALARY_CAP;
+  let qbTeam = null, qbOppTeam = null;
+  let stackSatisfied = !requireStack;
+  let bringBackSatisfied = !requireBringBack;
+  let flexUsed = false;
+
+  // Places a player into its natural position slot if there's room, otherwise
+  // into FLEX (if eligible and FLEX is still open). Returns false if neither
+  // slot has room (caller should treat the candidate as unusable).
+  function place(p) {
+    const slotKey = p.position;
+    if (slots[slotKey] && slots[slotKey].length < ROSTER_SLOTS[slotKey]) {
+      slots[slotKey].push(p); used.add(p.id); salaryLeft -= p.salary;
+      return true;
+    }
+    if (flexEligible.has(slotKey) && !flexUsed) {
+      slots.FLEX.push(p); used.add(p.id); salaryLeft -= p.salary;
+      flexUsed = true;
+      return true;
+    }
+    return false;
+  }
+
+  function weight(p) {
+    let base = scoreFn(p);
+    if (maxExposure != null) {
+      const used_n = exposure.get(p.name) || 0;
+      if (used_n >= maxExposure) base *= 0.25; // heavy soft penalty, not a hard ban
+    }
+    const n = 1 + (rng() * 2 - 1) * noise;
+    return base * n;
+  }
+
+  function eligible(list, filledCounts) {
+    return list.filter(p => {
+      if (used.has(p.id)) return false;
+      const remaining = remainingSlotsAfter(filledCounts) - 1;
+      const minFutureSalary = remaining * 3000; // cheapest realistic DK salary floor
+      if (p.salary > salaryLeft - minFutureSalary) return false;
+      return true;
+    });
+  }
+
+  // 1. QB
+  {
+    let candidates = eligible(qbPool, {});
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => weight(b) - weight(a));
+    const qb = pickWeighted(candidates, rng, topK);
+    place(qb);
+    qbTeam = qb.team; qbOppTeam = oppTeam(qb);
+  }
+
+  // 2. If a stack is required, try to lock in a same-team pass-catcher early (WR/TE)
+  if (requireStack) {
+    const stackCandidates = [...byPos.WR, ...byPos.TE].filter(
+      p => p.team === qbTeam && !used.has(p.id) &&
+           p.salary <= salaryLeft - remainingSlotsAfter({ QB: 1 }) * 3000
+    );
+    if (stackCandidates.length > 0) {
+      stackCandidates.sort((a, b) => weight(b) - weight(a));
+      const partner = pickWeighted(stackCandidates, rng, topK);
+      if (place(partner)) stackSatisfied = true;
+    }
+  }
+
+  // 3. If bring-back required, try to lock a player from QB's opponent team
+  if (requireBringBack) {
+    const filledSoFar = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: flexUsed ? 1 : 0 };
+    const bbCandidates = pool.filter(
+      p => p.team === qbOppTeam && p.position !== "DST" && !used.has(p.id) &&
+           p.salary <= salaryLeft - remainingSlotsAfter(filledSoFar) * 3000
+    );
+    if (bbCandidates.length > 0) {
+      bbCandidates.sort((a, b) => weight(b) - weight(a));
+      const bb = pickWeighted(bbCandidates, rng, topK);
+      if (place(bb)) bringBackSatisfied = true;
+    }
+  }
+
+  // 4. Fill remaining fixed slots: RB, WR, TE, DST
+  for (const pos of ["RB", "WR", "TE", "DST"]) {
+    const need = ROSTER_SLOTS[pos] - slots[pos].length;
+    for (let i = 0; i < need; i++) {
+      const filledCounts = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length };
+      let candidates = eligible(byPos[pos], filledCounts);
+      if (candidates.length === 0) return null;
+      candidates.sort((a, b) => weight(b) - weight(a));
+      const pick = pickWeighted(candidates, rng, topK);
+      slots[pos].push(pick); used.add(pick.id); salaryLeft -= pick.salary;
+    }
+  }
+
+  // 5. Fill FLEX (only if not already consumed by a stack/bring-back overflow above)
+  if (!flexUsed) {
+    const flexPool = pool.filter(p => flexEligible.has(p.position) && !used.has(p.id));
+    const filledCounts = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: 0 };
+    let candidates = eligible(flexPool, filledCounts);
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => weight(b) - weight(a));
+    const flexPick = pickWeighted(candidates, rng, topK);
+    slots.FLEX.push(flexPick); used.add(flexPick.id); salaryLeft -= flexPick.salary;
+  }
+
+  if (requireStack && !stackSatisfied) return null;
+  if (requireBringBack && !bringBackSatisfied) return null;
+
+  const arr = lineupArray(slots);
+  if (arr.length !== 9) return null;
+  if (lineupSalary(arr) > SALARY_CAP) return null;
+  return { slots, arr };
+}
+
+/** Hill-climb: try single-player swaps that improve scoreFn total while keeping
+ * salary <= cap and (if required) stack/bring-back constraints intact. */
+function improveLineup(lineup, pool, scoreFn, opts = {}) {
+  const { requireStack = false, requireBringBack = false, iterations = 60,
+          flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null } = opts;
+  let { slots, arr } = lineup;
+  const usedIds = new Set(arr.map(p => p.id));
+
+  function qbTeamOf(arrX) { const qb = arrX.find(p => p.position === "QB"); return qb ? qb.team : null; }
+  function qbOppOf(arrX) { const qb = arrX.find(p => p.position === "QB"); return qb ? oppTeam(qb) : null; }
+  function hasStackArr(arrX) { const t = qbTeamOf(arrX); return arrX.some(p => p.position !== "QB" && p.team === t); }
+  function hasBringBackArr(arrX) { const o = qbOppOf(arrX); return arrX.some(p => p.position !== "QB" && p.team === o); }
+
+  const slotKeyOf = (p, slots) => {
+    for (const k of Object.keys(slots)) if (slots[k].includes(p)) return k;
+    return null;
+  };
+
+  for (let it = 0; it < iterations; it++) {
+    let improved = false;
+    for (const p of arr) {
+      const slotKey = slotKeyOf(p, slots);
+      if (!slotKey) continue;
+      const eligiblePosSet = slotKey === "FLEX" ? flexEligible : new Set([slotKey]);
+      const salaryLeftIfRemoved = SALARY_CAP - lineupSalary(arr) + p.salary;
+      let candidates = pool.filter(
+        c => eligiblePosSet.has(c.position) && !usedIds.has(c.id) && c.salary <= salaryLeftIfRemoved
+      );
+      if (slotKey === "QB" && qbTeamFilter) {
+        candidates = candidates.filter(c => qbTeamFilter.has(c.team));
+      }
+      let best = null, bestScore = scoreFn(p);
+      for (const c of candidates) {
+        if (scoreFn(c) > bestScore) { best = c; bestScore = scoreFn(c); }
+      }
+      if (best) {
+        // tentatively swap, then validate the RESULTING lineup (not the old one)
+        const idx = slots[slotKey].indexOf(p);
+        slots[slotKey][idx] = best;
+        const newArr = lineupArray(slots);
+        const newStackOk = !requireStack || hasStackArr(newArr);
+        const newBBOk = !requireBringBack || hasBringBackArr(newArr);
+        if (lineupSalary(newArr) <= SALARY_CAP && newStackOk && newBBOk) {
+          usedIds.delete(p.id); usedIds.add(best.id);
+          arr = newArr;
+          improved = true;
+        } else {
+          slots[slotKey][idx] = p; // revert
+        }
+      }
+    }
+    if (!improved) break;
+  }
+  return { slots, arr };
+}
+
+/* ---------------------- Batch generation ---------------------- */
+
+function generateTopN(players, metricFn, n, opts = {}) {
+  const { attempts = 400, seed = 1, flexEligible = FLEX_ELIGIBLE } = opts;
+  const rng = mulberry32(seed);
+  const results = new Map(); // signature -> {arr, score}
+
+  for (let i = 0; i < attempts; i++) {
+    const built = buildOneLineup(players, { scoreFn: metricFn, rng, noise: 0.10, flexEligible });
+    if (!built) continue;
+    const improved = improveLineup(built, players, metricFn, { flexEligible });
+    const sig = signature(improved.arr);
+    const score = lineupScore(improved.arr, metricFn);
+    if (!results.has(sig) || results.get(sig).score < score) {
+      results.set(sig, { arr: improved.arr, score });
+    }
+  }
+
+  const sorted = [...results.values()].sort((a, b) => b.score - a.score);
+  return sorted.slice(0, n).map(r => r.arr);
+}
+
+function overlapCount(a, b) {
+  const idsB = new Set(b.map(p => p.id));
+  return a.filter(p => idsB.has(p.id)).length;
+}
+
+function generateCorrelatedLineups(players, n, opts = {}) {
+  const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, bringBackShare = 0.5,
+          maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
+          flexEligible = FLEX_ELIGIBLE, stackTeams = null } = opts;
+  const rng = mulberry32(seed);
+  const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
+  const qbTeamFilter = (stackTeams && stackTeams.length > 0) ? new Set(stackTeams) : null;
+
+  const leverageScore = (p) => {
+    const ownRaw = p[ownershipField];
+    const own = isNaN(ownRaw) ? 0 : ownRaw;
+    return p.ceiling * (1 - (ownershipWeight * own) / 100);
+  };
+
+  // Phase 1: generate a large pool of valid, stack-satisfying candidates
+  const candidates = [];
+  const seenSigs = new Set();
+  for (let i = 0; i < poolAttempts; i++) {
+    const wantBringBack = rng() < bringBackShare;
+    const built = buildOneLineup(players, {
+      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter,
+      requireStack: true, requireBringBack: wantBringBack,
+    });
+    if (!built) continue;
+    const improved = improveLineup(built, players, leverageScore, {
+      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter,
+    });
+    const sig = signature(improved.arr);
+    if (seenSigs.has(sig)) continue;
+    seenSigs.add(sig);
+    const score = lineupScore(improved.arr, leverageScore);
+    candidates.push({ arr: improved.arr, bringBack: wantBringBack, score });
+  }
+
+  // Phase 2: greedily accept the best candidates subject to exposure cap + diversity,
+  // progressively relaxing those constraints if the pool doesn't have enough headroom.
+  candidates.sort((a, b) => b.score - a.score);
+  const accepted = [];
+  const exposure = new Map();
+
+  function attemptFill(curMaxExposure, curMaxOverlap) {
+    for (const c of candidates) {
+      if (accepted.length >= n) break;
+      if (accepted.includes(c)) continue;
+      if (c.arr.some(p => (exposure.get(p.name) || 0) >= curMaxExposure)) continue;
+      if (accepted.some(a => overlapCount(a.arr, c.arr) > curMaxOverlap)) continue;
+      accepted.push(c);
+      for (const p of c.arr) exposure.set(p.name, (exposure.get(p.name) || 0) + 1);
+    }
+  }
+
+  const relaxSteps = [
+    [maxExposure, maxOverlap],
+    [maxExposure + 3, maxOverlap + 1],
+    [maxExposure + 6, maxOverlap + 2],
+    [maxExposure + 10, 8],
+    [n, 9], // final fallback: only exact-duplicate signatures are excluded (already deduped in pool)
+  ];
+  for (const [exp, ov] of relaxSteps) {
+    if (accepted.length >= n) break;
+    attemptFill(exp, ov);
+  }
+
+  return accepted.slice(0, n);
+}
+
+/* ---------------------- Exports (Node + browser) ---------------------- */
+const DFSEngine = {
+  parseCSV, resolveColumns, loadPlayers, cleanNumber, SALARY_CAP, ROSTER_SLOTS, FLEX_ELIGIBLE,
+  oppTeam, buildOneLineup, improveLineup, mulberry32, lineupSalary, lineupScore, signature,
+  overlapCount, generateTopN, generateCorrelatedLineups,
+};
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = DFSEngine;
+}
+if (typeof window !== "undefined") {
+  window.DFSEngine = DFSEngine;
+}
+
+</script>
+<script>
+(function () {
+  "use strict";
+  const eng = window.DFSEngine;
+
+  const state = {
+    players: null,
+    results: { proj: null, ceil: null, small: null, large: null },
+    selectedTeams: new Set(),
+  };
+
+  const els = {
+    fileInput: document.getElementById("fileInput"),
+    fileStatus: document.getElementById("fileStatus"),
+    panelToggle: document.getElementById("panelToggle"),
+    panelBody: document.getElementById("panelBody"),
+    tabbar: document.getElementById("tabbar"),
+    content: document.getElementById("content"),
+    statusLine: document.getElementById("statusLine"),
+    generateBtn: document.getElementById("generateBtn"),
+    exportBtn: document.getElementById("exportBtn"),
+    sliderSmallOwn: document.getElementById("sliderSmallOwn"),
+    sliderLargeOwn: document.getElementById("sliderLargeOwn"),
+    sliderBringback: document.getElementById("sliderBringback"),
+    sliderExposure: document.getElementById("sliderExposure"),
+    sliderGppCount: document.getElementById("sliderGppCount"),
+    toggleTEFlex: document.getElementById("toggleTEFlex"),
+    teamPickerGroup: document.getElementById("teamPickerGroup"),
+    teamChipGrid: document.getElementById("teamChipGrid"),
+    teamPickerCount: document.getElementById("teamPickerCount"),
+    teamPickerClear: document.getElementById("teamPickerClear"),
+    valSmallOwn: document.getElementById("valSmallOwn"),
+    valLargeOwn: document.getElementById("valLargeOwn"),
+    valBringback: document.getElementById("valBringback"),
+    valExposure: document.getElementById("valExposure"),
+    valGppCount: document.getElementById("valGppCount"),
+    tabCountSmall: document.getElementById("tabCountSmall"),
+    tabCountLarge: document.getElementById("tabCountLarge"),
+    pasteToggle: document.getElementById("pasteToggle"),
+    pasteArea: document.getElementById("pasteArea"),
+    pasteText: document.getElementById("pasteText"),
+    pasteLoadBtn: document.getElementById("pasteLoadBtn"),
+  };
+
+  let activeTab = "proj";
+
+  /* ---------------- Panel toggle ---------------- */
+  els.panelToggle.addEventListener("click", () => {
+    const open = els.panelBody.classList.toggle("open");
+    els.panelToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
+  /* ---------------- Sliders ---------------- */
+  function bindSlider(slider, label, suffix) {
+    slider.addEventListener("input", () => { label.textContent = slider.value + suffix; });
+  }
+  bindSlider(els.sliderSmallOwn, els.valSmallOwn, "%");
+  bindSlider(els.sliderLargeOwn, els.valLargeOwn, "%");
+  bindSlider(els.sliderBringback, els.valBringback, "%");
+  bindSlider(els.sliderExposure, els.valExposure, "%");
+  els.sliderGppCount.addEventListener("input", () => {
+    els.valGppCount.textContent = els.sliderGppCount.value;
+    els.tabCountSmall.textContent = "·" + els.sliderGppCount.value;
+    els.tabCountLarge.textContent = "·" + els.sliderGppCount.value;
+  });
+
+  /* ---------------- File load ---------------- */
+  els.fileInput.addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      loadCsvText(evt.target.result, file.name);
+    };
+    reader.onerror = () => {
+      els.fileStatus.textContent = "Could not read file.";
+      els.fileStatus.className = "file-status err";
+    };
+    reader.readAsText(file);
+  });
+
+  function loadCsvText(text, sourceLabel) {
+    try {
+      const players = eng.loadPlayers(text);
+      if (players.length === 0) throw new Error("No player rows found in the data.");
+      state.players = players;
+      state.selectedTeams = new Set();
+      els.fileStatus.textContent = `${players.length} players loaded${sourceLabel ? " (" + sourceLabel + ")" : ""}`;
+      els.fileStatus.className = "file-status ok";
+      els.generateBtn.disabled = false;
+      populateTeamChips(players);
+      return true;
+    } catch (err) {
+      els.fileStatus.textContent = "Error: " + err.message;
+      els.fileStatus.className = "file-status err";
+      els.generateBtn.disabled = true;
+      return false;
+    }
+  }
+
+  els.pasteToggle.addEventListener("click", () => {
+    const showing = els.pasteArea.style.display !== "none";
+    els.pasteArea.style.display = showing ? "none" : "block";
+    els.pasteToggle.textContent = showing
+      ? "Trouble picking a file? Paste CSV text instead ▾"
+      : "Hide paste box ▴";
+  });
+
+  els.pasteLoadBtn.addEventListener("click", () => {
+    const text = els.pasteText.value;
+    if (!text.trim()) {
+      els.fileStatus.textContent = "Paste box is empty.";
+      els.fileStatus.className = "file-status err";
+      return;
+    }
+    loadCsvText(text, "pasted data");
+  });
+
+  function populateTeamChips(players) {
+    const teamsWithQB = [...new Set(players.filter(p => p.position === "QB").map(p => p.team))].sort();
+    els.teamChipGrid.innerHTML = teamsWithQB.map(t =>
+      `<button class="team-chip" data-team="${escapeHtml(t)}">${escapeHtml(t)}</button>`
+    ).join("");
+    els.teamPickerGroup.style.display = teamsWithQB.length ? "block" : "none";
+    updateTeamPickerCount();
+  }
+
+  els.teamChipGrid.addEventListener("click", (e) => {
+    const chip = e.target.closest(".team-chip");
+    if (!chip) return;
+    const team = chip.dataset.team;
+    if (state.selectedTeams.has(team)) {
+      state.selectedTeams.delete(team);
+      chip.classList.remove("selected");
+    } else {
+      state.selectedTeams.add(team);
+      chip.classList.add("selected");
+    }
+    updateTeamPickerCount();
+  });
+
+  function updateTeamPickerCount() {
+    const n = state.selectedTeams.size;
+    els.teamPickerCount.textContent = n === 0 ? "All teams" : `${n} selected`;
+  }
+
+  els.teamPickerClear.addEventListener("click", () => {
+    state.selectedTeams.clear();
+    els.teamChipGrid.querySelectorAll(".team-chip").forEach(c => c.classList.remove("selected"));
+    updateTeamPickerCount();
+  });
+
+  /* ---------------- Tabs ---------------- */
+  els.tabbar.addEventListener("click", (e) => {
+    const btn = e.target.closest(".tab");
+    if (!btn) return;
+    els.tabbar.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    btn.classList.add("active");
+    activeTab = btn.dataset.tab;
+    render();
+  });
+
+  /* ---------------- Generate ---------------- */
+  els.generateBtn.addEventListener("click", () => {
+    if (!state.players) return;
+    els.generateBtn.disabled = true;
+    els.exportBtn.disabled = true;
+    setStatus("Generating Projection lineups...");
+    // Chunk the work with setTimeout so the UI can repaint status between stages.
+    setTimeout(() => {
+      const players = state.players;
+      const flexEligible = els.toggleTEFlex.checked ? new Set(["RB", "WR", "TE"]) : new Set(["RB", "WR"]);
+      state.results.proj = eng.generateTopN(players, p => p.proj, 10, { attempts: 500, seed: 1, flexEligible });
+      setStatus("Generating Ceiling lineups...");
+      setTimeout(() => {
+        state.results.ceil = eng.generateTopN(players, p => p.ceiling, 5, { attempts: 500, seed: 7, flexEligible });
+        setStatus("Generating Small Field GPP lineups...");
+        setTimeout(() => {
+          const n = parseInt(els.sliderGppCount.value, 10);
+          const smallOwn = parseInt(els.sliderSmallOwn.value, 10) / 100;
+          const bbShare = parseInt(els.sliderBringback.value, 10) / 100;
+          const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
+          state.results.small = eng.generateCorrelatedLineups(players, n, {
+            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible,
+            ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
+            stackTeams: [...state.selectedTeams],
+          });
+          setStatus("Generating Large Field GPP lineups...");
+          setTimeout(() => {
+            const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
+            state.results.large = eng.generateCorrelatedLineups(players, n, {
+              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible,
+              ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
+              stackTeams: [...state.selectedTeams],
+            });
+            setStatus("Done.");
+            els.generateBtn.disabled = false;
+            els.exportBtn.disabled = false;
+            updateTabCounts();
+            render();
+          }, 30);
+        }, 30);
+      }, 30);
+    }, 30);
+  });
+
+  function setStatus(msg, isErr) {
+    els.statusLine.textContent = msg;
+    els.statusLine.className = "status-line" + (isErr ? " err" : "");
+  }
+
+  function updateTabCounts() {
+    document.querySelector('[data-tab="proj"] .count').textContent = "·" + (state.results.proj ? state.results.proj.length : 10);
+    document.querySelector('[data-tab="ceil"] .count').textContent = "·" + (state.results.ceil ? state.results.ceil.length : 5);
+    els.tabCountSmall.textContent = "·" + (state.results.small ? state.results.small.length : els.sliderGppCount.value);
+    els.tabCountLarge.textContent = "·" + (state.results.large ? state.results.large.length : els.sliderGppCount.value);
+  }
+
+  /* ---------------- Rendering ---------------- */
+  function fmtMoney(n) { return "$" + Math.round(n).toLocaleString("en-US"); }
+  function fmtNum(n) { return (Math.round(n * 10) / 10).toFixed(1); }
+
+  function lineupTotals(arr) {
+    return {
+      salary: arr.reduce((s, p) => s + p.salary, 0),
+      proj: arr.reduce((s, p) => s + p.proj, 0),
+      own: arr.reduce((s, p) => s + p.own, 0),
+      floor: arr.reduce((s, p) => s + p.floor, 0),
+      ceiling: arr.reduce((s, p) => s + p.ceiling, 0),
+    };
+  }
+
+  function slotOrder(arr) {
+    const order = { QB: 0, RB: 1, WR: 2, TE: 3, FLEX: 4, DST: 5 };
+    const base = { QB: 1, RB: 2, WR: 3, TE: 1, DST: 1 };
+    const withSlot = [];
+    const seenPerPos = {};
+    for (const p of arr) {
+      seenPerPos[p.position] = (seenPerPos[p.position] || 0) + 1;
+      const isOverBase = seenPerPos[p.position] > (base[p.position] || 0);
+      withSlot.push({ p, slot: isOverBase ? "FLEX" : p.position });
+    }
+    withSlot.sort((a, b) => order[a.slot] - order[b.slot]);
+    return withSlot;
+  }
+
+  function renderLineupCard(arr, idx, opts = {}) {
+    const { bringBack, showBadges } = opts;
+    const totals = lineupTotals(arr);
+    const withSlot = slotOrder(arr);
+    const qb = arr.find(p => p.position === "QB");
+    const qbTeam = qb ? qb.team : null;
+    const qbOpp = qb ? eng.oppTeam(qb) : null;
+
+    let badgesHtml = "";
+    if (showBadges) {
+      const hasStack = arr.some(p => p.position !== "QB" && p.team === qbTeam);
+      const hasBB = arr.some(p => p.position !== "QB" && p.team === qbOpp);
+      if (hasStack) badgesHtml += `<span class="badge stack">STACK</span>`;
+      if (hasBB) badgesHtml += `<span class="badge bringback">BRING-BACK</span>`;
+    }
+
+    const rows = withSlot.map(({ p, slot }) => {
+      const isStackRow = showBadges && p.position !== "QB" && p.team === qbTeam;
+      const isBBRow = showBadges && p.position !== "QB" && p.team === qbOpp;
+      const rowClass = isStackRow ? "stack-row" : (isBBRow ? "bringback-row" : "");
+      return `<tr class="${rowClass}">
+        <td class="slot">${slot}</td>
+        <td>${escapeHtml(p.name)}</td>
+        <td>${escapeHtml(p.team)}</td>
+        <td>${escapeHtml(p.opp)}</td>
+        <td class="num">${fmtMoney(p.salary)}</td>
+        <td class="num">${fmtNum(p.proj)}</td>
+        <td class="num">${fmtNum(p.own)}%</td>
+        <td class="num">${fmtNum(p.floor)}</td>
+        <td class="num">${fmtNum(p.ceiling)}</td>
+      </tr>`;
+    }).join("");
+
+    return `<div class="lineup-card">
+      <div class="lineup-head">
+        <span class="num">Lineup ${String(idx + 1).padStart(2, "0")}</span>
+        <span class="badges">${badgesHtml}</span>
+      </div>
+      <div class="table-scroll"><table class="lineup-table">
+        <thead><tr><th></th><th>Player</th><th>Tm</th><th>Opp</th><th>Sal</th><th>Proj</th><th>Own</th><th>Flr</th><th>Ceil</th></tr></thead>
+        <tbody>
+          ${rows}
+          <tr class="totals-row">
+            <td class="label" colspan="4">TOTALS</td>
+            <td class="num">${fmtMoney(totals.salary)}</td>
+            <td class="num">${fmtNum(totals.proj)}</td>
+            <td class="num">${fmtNum(totals.own)}%</td>
+            <td class="num">${fmtNum(totals.floor)}</td>
+            <td class="num">${fmtNum(totals.ceiling)}</td>
+          </tr>
+        </tbody>
+      </table></div>
+    </div>`;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function renderExposureTab() {
+    const buckets = [
+      { label: "Projection ×10", data: state.results.proj },
+      { label: "Ceiling ×5", data: state.results.ceil },
+      { label: "Small Field", data: state.results.small ? state.results.small.map(r => r.arr) : null },
+      { label: "Large Field", data: state.results.large ? state.results.large.map(r => r.arr) : null },
+    ];
+    if (buckets.every(b => !b.data)) {
+      return `<div class="empty-state"><div class="big">No lineups yet</div>Generate lineups to see exposure.</div>`;
+    }
+    const exposure = new Map();
+    let totalLineups = 0;
+    for (const b of buckets) {
+      if (!b.data) continue;
+      totalLineups += b.data.length;
+      for (const arr of b.data) {
+        for (const p of arr) {
+          const rec = exposure.get(p.name) || { count: 0, team: p.team, position: p.position };
+          rec.count++;
+          exposure.set(p.name, rec);
+        }
+      }
+    }
+    const rows = [...exposure.entries()].sort((a, b) => b[1].count - a[1].count);
+    const maxCount = rows.length ? rows[0][1].count : 1;
+    const body = rows.map(([name, rec]) => {
+      const pct = Math.round((rec.count / totalLineups) * 100);
+      const barPct = Math.round((rec.count / maxCount) * 100);
+      return `<tr>
+        <td>${escapeHtml(name)}</td>
+        <td>${escapeHtml(rec.team)}</td>
+        <td>${escapeHtml(rec.position)}</td>
+        <td class="num">${rec.count}/${totalLineups}</td>
+        <td class="num">${pct}%</td>
+        <td><span class="exp-bar-bg"><span class="exp-bar-fill" style="width:${barPct}%"></span></span></td>
+      </tr>`;
+    }).join("");
+    return `<div style="overflow-x:auto"><table class="exposure-table">
+      <thead><tr><th>Player</th><th>Tm</th><th>Pos</th><th>Count</th><th>%</th><th></th></tr></thead>
+      <tbody>${body}</tbody>
+    </table></div>`;
+  }
+
+  function render() {
+    let html = "";
+    if (activeTab === "proj") {
+      if (!state.results.proj) html = emptyState();
+      else html = state.results.proj.map((arr, i) => renderLineupCard(arr, i, { showBadges: false })).join("");
+    } else if (activeTab === "ceil") {
+      if (!state.results.ceil) html = emptyState();
+      else html = state.results.ceil.map((arr, i) => renderLineupCard(arr, i, { showBadges: false })).join("");
+    } else if (activeTab === "small") {
+      if (!state.results.small) html = emptyState();
+      else html = state.results.small.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true })).join("");
+    } else if (activeTab === "large") {
+      if (!state.results.large) html = emptyState();
+      else html = state.results.large.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true })).join("");
+    } else if (activeTab === "exposure") {
+      html = renderExposureTab();
+    }
+    els.content.innerHTML = html;
+  }
+
+  function emptyState() {
+    return `<div class="empty-state"><div class="big">Not generated yet</div>Tap "Generate Lineups" below.</div>`;
+  }
+
+  /* ---------------- CSV Export ---------------- */
+  els.exportBtn.addEventListener("click", () => {
+    const lines = [];
+    const cols = ["Name", "Team", "Opp", "Position", "Salary", "Projection", "Ownership", "Floor", "Ceiling"];
+
+    function pushBucket(title, arrs) {
+      lines.push([title]);
+      lines.push([]);
+      arrs.forEach((arr, i) => {
+        const totals = lineupTotals(arr);
+        lines.push([`Lineup #${i + 1}`]);
+        lines.push(["Slot", ...cols]);
+        slotOrder(arr).forEach(({ p, slot }) => {
+          lines.push([slot, p.name, p.team, p.opp, p.position, p.salary, p.proj, p.own, p.floor, p.ceiling]);
+        });
+        lines.push(["TOTALS", "", "", "", "", totals.salary, round1(totals.proj), round1(totals.own), round1(totals.floor), round1(totals.ceiling)]);
+        lines.push([]);
+      });
+    }
+    function round1(n) { return Math.round(n * 10) / 10; }
+
+    if (state.results.proj) pushBucket("TOP 10 — PROJECTION", state.results.proj);
+    if (state.results.ceil) pushBucket("TOP 5 — CEILING", state.results.ceil);
+    if (state.results.small) pushBucket("SMALL FIELD GPP", state.results.small.map(r => r.arr));
+    if (state.results.large) pushBucket("LARGE FIELD GPP", state.results.large.map(r => r.arr));
+
+    const csv = lines.map(row => row.map(csvEscape).join(",")).join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const dateStr = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `gridlock_lineups_${dateStr}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  function csvEscape(v) {
+    if (v === null || v === undefined) return "";
+    const s = String(v);
+    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  render();
+})();
+
+</script>
+</body>
+</html>

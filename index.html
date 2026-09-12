@@ -2048,11 +2048,11 @@ if (typeof window !== "undefined") {
   function fmtMoney(n) { return "$" + Math.round(n).toLocaleString("en-US"); }
   function fmtNum(n) { return (Math.round(n * 10) / 10).toFixed(1); }
 
-  function lineupTotals(arr) {
+  function lineupTotals(arr, ownField = "own") {
     return {
       salary: arr.reduce((s, p) => s + p.salary, 0),
       proj: arr.reduce((s, p) => s + p.proj, 0),
-      own: arr.reduce((s, p) => s + p.own, 0),
+      own: arr.reduce((s, p) => s + (p[ownField] != null && !isNaN(p[ownField]) ? p[ownField] : 0), 0),
       floor: arr.reduce((s, p) => s + p.floor, 0),
       ceiling: arr.reduce((s, p) => s + p.ceiling, 0),
     };
@@ -2078,8 +2078,8 @@ if (typeof window !== "undefined") {
   }
 
   function renderLineupCard(arr, idx, opts = {}) {
-    const { bringBack, showBadges } = opts;
-    const totals = lineupTotals(arr);
+    const { bringBack, showBadges, ownField = "own" } = opts;
+    const totals = lineupTotals(arr, ownField);
     const withSlot = slotOrder(arr);
     const qb = arr.find(p => p.position === "QB");
     const qbTeam = qb ? qb.team : null;
@@ -2098,6 +2098,7 @@ if (typeof window !== "undefined") {
       const isStackRow = showBadges && p.position !== "QB" && p.team === qbTeam;
       const isBBRow = showBadges && p.position !== "QB" && p.team === qbOpp;
       const rowClass = isStackRow ? "stack-row" : (isBBRow ? "bringback-row" : "");
+      const ownVal = p[ownField];
       return `<tr class="${rowClass}">
         <td class="slot">${slot}</td>
         <td>${escapeHtml(p.name)}</td>
@@ -2105,7 +2106,7 @@ if (typeof window !== "undefined") {
         <td>${escapeHtml(p.opp)}</td>
         <td class="num">${fmtMoney(p.salary)}</td>
         <td class="num">${fmtNum(p.proj)}</td>
-        <td class="num">${fmtNum(p.own)}%</td>
+        <td class="num">${(ownVal != null && !isNaN(ownVal)) ? fmtNum(ownVal) + "%" : "—"}</td>
         <td class="num">${fmtNum(p.floor)}</td>
         <td class="num">${fmtNum(p.ceiling)}</td>
       </tr>`;
@@ -2184,16 +2185,16 @@ if (typeof window !== "undefined") {
     let html = "";
     if (activeTab === "proj") {
       if (!state.results.proj) html = emptyState();
-      else html = state.results.proj.map((arr, i) => renderLineupCard(arr, i, { showBadges: false })).join("");
+      else html = state.results.proj.map((arr, i) => renderLineupCard(arr, i, { showBadges: false, ownField: "own" })).join("");
     } else if (activeTab === "ceil") {
       if (!state.results.ceil) html = emptyState();
-      else html = state.results.ceil.map((arr, i) => renderLineupCard(arr, i, { showBadges: false })).join("");
+      else html = state.results.ceil.map((arr, i) => renderLineupCard(arr, i, { showBadges: false, ownField: "own" })).join("");
     } else if (activeTab === "small") {
       if (!state.results.small) html = emptyState();
-      else html = state.results.small.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true })).join("");
+      else html = state.results.small.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true, ownField: "own" })).join("");
     } else if (activeTab === "large") {
       if (!state.results.large) html = emptyState();
-      else html = state.results.large.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true })).join("");
+      else html = state.results.large.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true, ownField: "ownLarge" })).join("");
     } else if (activeTab === "exposure") {
       html = renderExposureTab();
     }
@@ -2209,15 +2210,15 @@ if (typeof window !== "undefined") {
     const lines = [];
     const cols = ["Name", "Team", "Opp", "Position", "Salary", "Projection", "Ownership", "Floor", "Ceiling"];
 
-    function pushBucket(title, arrs) {
+    function pushBucket(title, arrs, ownField) {
       lines.push([title]);
       lines.push([]);
       arrs.forEach((arr, i) => {
-        const totals = lineupTotals(arr);
+        const totals = lineupTotals(arr, ownField);
         lines.push([`Lineup #${i + 1}`]);
         lines.push(["Slot", ...cols]);
         slotOrder(arr).forEach(({ p, slot }) => {
-          lines.push([slot, p.name, p.team, p.opp, p.position, p.salary, p.proj, p.own, p.floor, p.ceiling]);
+          lines.push([slot, p.name, p.team, p.opp, p.position, p.salary, p.proj, p[ownField], p.floor, p.ceiling]);
         });
         lines.push(["TOTALS", "", "", "", "", totals.salary, round1(totals.proj), round1(totals.own), round1(totals.floor), round1(totals.ceiling)]);
         lines.push([]);
@@ -2225,10 +2226,10 @@ if (typeof window !== "undefined") {
     }
     function round1(n) { return Math.round(n * 10) / 10; }
 
-    if (state.results.proj) pushBucket("TOP 10 — PROJECTION", state.results.proj);
-    if (state.results.ceil) pushBucket("TOP 5 — CEILING", state.results.ceil);
-    if (state.results.small) pushBucket("SMALL FIELD GPP", state.results.small.map(r => r.arr));
-    if (state.results.large) pushBucket("LARGE FIELD GPP", state.results.large.map(r => r.arr));
+    if (state.results.proj) pushBucket("TOP 10 — PROJECTION", state.results.proj, "own");
+    if (state.results.ceil) pushBucket("TOP 5 — CEILING", state.results.ceil, "own");
+    if (state.results.small) pushBucket("SMALL FIELD GPP", state.results.small.map(r => r.arr), "own");
+    if (state.results.large) pushBucket("LARGE FIELD GPP", state.results.large.map(r => r.arr), "ownLarge");
 
     const csv = lines.map(row => row.map(csvEscape).join(",")).join("\r\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });

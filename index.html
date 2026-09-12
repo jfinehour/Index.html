@@ -1484,7 +1484,21 @@ if (typeof window !== "undefined") {
     reader.readAsText(file);
   });
 
-  function loadCsvText(text, sourceLabel) {
+  /* ---------------- Local persistence (survives reload/close) ---------------- */
+  const STORAGE_KEY_CSV = "gridlock_csv_text";
+  const STORAGE_KEY_VEGAS = "gridlock_vegas_text";
+
+  function safeStorageSet(key, value) {
+    try { localStorage.setItem(key, value); } catch (e) { /* storage unavailable (private mode, etc.) — degrade silently */ }
+  }
+  function safeStorageGet(key) {
+    try { return localStorage.getItem(key); } catch (e) { return null; }
+  }
+  function safeStorageRemove(key) {
+    try { localStorage.removeItem(key); } catch (e) { /* ignore */ }
+  }
+
+  function loadCsvText(text, sourceLabel, opts = {}) {
     try {
       const players = eng.loadPlayers(text);
       if (players.length === 0) throw new Error("No player rows found in the data.");
@@ -1494,6 +1508,7 @@ if (typeof window !== "undefined") {
       els.fileStatus.className = "file-status ok";
       els.generateBtn.disabled = false;
       populateTeamChips(players);
+      if (!opts.skipPersist) safeStorageSet(STORAGE_KEY_CSV, text);
       return true;
     } catch (err) {
       els.fileStatus.textContent = "Error: " + err.message;
@@ -1526,6 +1541,8 @@ if (typeof window !== "undefined") {
     state.results = { proj: null, ceil: null, small: null, large: null };
     state.selectedTeams = new Set();
     state.vegasContext = null;
+    safeStorageRemove(STORAGE_KEY_CSV);
+    safeStorageRemove(STORAGE_KEY_VEGAS);
 
     els.fileInput.value = "";
     els.fileStatus.textContent = "No file loaded yet";
@@ -1565,6 +1582,7 @@ if (typeof window !== "undefined") {
       state.vegasContext = ctx;
       els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded`;
       els.vegasStatus.className = "vegas-status ok";
+      safeStorageSet(STORAGE_KEY_VEGAS, text);
     } catch (err) {
       els.vegasStatus.textContent = "Error: " + err.message;
       els.vegasStatus.className = "vegas-status err";
@@ -1576,6 +1594,7 @@ if (typeof window !== "undefined") {
     els.vegasText.value = "";
     els.vegasStatus.textContent = "Not loaded";
     els.vegasStatus.className = "vegas-status";
+    safeStorageRemove(STORAGE_KEY_VEGAS);
   });
 
   els.vegasPrefillBtn.addEventListener("click", () => {
@@ -1906,6 +1925,27 @@ if (typeof window !== "undefined") {
     if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
     return s;
   }
+
+  /* ---------------- Restore persisted data on load ---------------- */
+  (function restoreFromStorage() {
+    const savedCsv = safeStorageGet(STORAGE_KEY_CSV);
+    if (savedCsv) {
+      const ok = loadCsvText(savedCsv, "restored from last session", { skipPersist: true });
+      if (!ok) safeStorageRemove(STORAGE_KEY_CSV); // stale/corrupt — don't keep re-trying it
+    }
+    const savedVegas = safeStorageGet(STORAGE_KEY_VEGAS);
+    if (savedVegas) {
+      try {
+        const ctx = eng.parseVegasLines(savedVegas);
+        state.vegasContext = ctx;
+        els.vegasText.value = savedVegas;
+        els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded (restored)`;
+        els.vegasStatus.className = "vegas-status ok";
+      } catch (e) {
+        safeStorageRemove(STORAGE_KEY_VEGAS);
+      }
+    }
+  })();
 
   render();
 })();

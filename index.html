@@ -7,27 +7,27 @@
 <style>
 /* ============================================================
    GRIDLOCK — DFS Lineup Builder
-   Design: stadium scoreboard at night. Deep turf-charcoal field,
-   amber scoreboard glow for actions, turf green + dusk blue as
-   informational badges (stack / bring-back), never decoration.
+   Design: Buffalo Bills colorway — deep navy field, royal blue
+   for structural/informational accents (team = stacking), red
+   as the primary action/highlight color, white text.
    ============================================================ */
 
 :root {
-  --bg: #101915;
-  --bg-panel: #172420;
-  --bg-panel-raised: #1D2E28;
-  --line: #2B3F36;
-  --line-soft: #223129;
-  --text: #ECE7D8;
-  --text-dim: #8FA396;
-  --text-faint: #5F7267;
-  --amber: #D9A441;
-  --amber-dim: #8A6A2E;
-  --turf: #4C9563;
-  --turf-dim: #2E4F3A;
-  --dusk: #4C86A6;
-  --dusk-dim: #2C4A5A;
-  --rust: #BD5238;
+  --bg: #070E24;
+  --bg-panel: #0D1A3D;
+  --bg-panel-raised: #142A5C;
+  --line: #2A3F72;
+  --line-soft: #1C2F5C;
+  --text: #F4F6FA;
+  --text-dim: #A9B7D6;
+  --text-faint: #6478A8;
+  --amber: #D22630;
+  --amber-dim: #7A0F1A;
+  --turf: #2D5FCC;
+  --turf-dim: #1B3272;
+  --dusk: #C9D3E0;
+  --dusk-dim: #33456F;
+  --rust: #9A1420;
   --radius: 3px;
 }
 
@@ -68,6 +68,13 @@ header.hero {
   gap: 10px;
 }
 .hero-title .dot { color: var(--amber); }
+.football-icon {
+  display: block;
+  width: 56px;
+  height: auto;
+  margin: 6px 0 2px;
+  transform: rotate(-12deg);
+}
 .hero-sub {
   margin: 4px 0 0;
   color: var(--text-dim);
@@ -94,6 +101,18 @@ header.hero {
   min-height: 44px;
 }
 .file-btn:active { background: var(--line-soft); }
+.reset-btn {
+  background: none;
+  border: 1px solid var(--rust);
+  color: #F0A8AE;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+}
+.reset-btn:active { background: var(--rust); color: var(--text); }
 #fileInput {
   position: absolute;
   width: 1px;
@@ -429,10 +448,21 @@ table.exposure-table td.num { text-align: right; }
 
   <header class="hero">
     <h1 class="hero-title">GRIDLOCK<span class="dot">.</span></h1>
+    <svg class="football-icon" viewBox="0 0 100 60" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <ellipse cx="50" cy="30" rx="47" ry="25" fill="#7B4326" stroke="#3E2314" stroke-width="2.5"/>
+      <path d="M 6 30 A 47 25 0 0 1 94 30" fill="none" stroke="#F4F6FA" stroke-width="1.5" opacity="0.35"/>
+      <path d="M 6 30 A 47 25 0 0 0 94 30" fill="none" stroke="#F4F6FA" stroke-width="1.5" opacity="0.35"/>
+      <line x1="20" y1="30" x2="80" y2="30" stroke="#F4F6FA" stroke-width="3"/>
+      <line x1="34" y1="22" x2="34" y2="38" stroke="#F4F6FA" stroke-width="3"/>
+      <line x1="44" y1="22" x2="44" y2="38" stroke="#F4F6FA" stroke-width="3"/>
+      <line x1="54" y1="22" x2="54" y2="38" stroke="#F4F6FA" stroke-width="3"/>
+      <line x1="64" y1="22" x2="64" y2="38" stroke="#F4F6FA" stroke-width="3"/>
+    </svg>
     <p class="hero-sub">DFS lineup builder — Projection, Ceiling &amp; GPP correlation, all on-device.</p>
     <div class="upload-row">
       <label class="file-btn" for="fileInput">Load projections CSV</label>
       <input type="file" id="fileInput" accept=".csv,text/csv,text/comma-separated-values,text/plain,application/vnd.ms-excel,application/csv">
+      <button type="button" class="reset-btn" id="resetBtn" title="Clear loaded data and start over">Start Over</button>
       <span class="file-status" id="fileStatus">No file loaded yet</span>
     </div>
     <button type="button" class="paste-toggle" id="pasteToggle">Trouble picking a file? Paste CSV text instead ▾</button>
@@ -459,6 +489,12 @@ table.exposure-table td.num { text-align: right; }
         <div class="slider-label"><b>Large Field ownership fade</b><span class="val" id="valLargeOwn">55%</span></div>
         <input type="range" id="sliderLargeOwn" min="0" max="100" value="55">
         <div class="slider-note">Large-field GPPs reward differentiation — default fades chalk harder than Small Field.</div>
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label"><b>Stack size</b><span class="val" id="valStackSize">QB + 1</span></div>
+        <input type="range" id="sliderStackSize" min="1" max="3" value="1" step="1">
+        <div class="slider-note">Number of same-team teammates rostered alongside the QB. Push to 2 or 3 to target games you expect to blow past the Vegas total.</div>
       </div>
 
       <div class="slider-group">
@@ -684,7 +720,7 @@ function mulberry32(seed) {
 function buildOneLineup(pool, opts) {
   const { scoreFn, rng, noise = 0.15, requireStack = false, requireBringBack = false,
           exposure = new Map(), maxExposure = null, topK = 5,
-          flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null } = opts;
+          flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1 } = opts;
 
   const byPos = { QB: [], RB: [], WR: [], TE: [], DST: [] };
   for (const p of pool) if (byPos[p.position]) byPos[p.position].push(p);
@@ -745,17 +781,22 @@ function buildOneLineup(pool, opts) {
     qbTeam = qb.team; qbOppTeam = oppTeam(qb);
   }
 
-  // 2. If a stack is required, try to lock in a same-team pass-catcher early (WR/TE)
+  // 2. If a stack is required, lock in `stackSize` same-team teammates (RB/WR/TE) early
   if (requireStack) {
-    const stackCandidates = [...byPos.WR, ...byPos.TE].filter(
-      p => p.team === qbTeam && !used.has(p.id) &&
-           p.salary <= salaryLeft - remainingSlotsAfter({ QB: 1 }) * 3000
-    );
-    if (stackCandidates.length > 0) {
+    let placedCount = 0;
+    for (let s = 0; s < stackSize; s++) {
+      const filledSoFar = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: flexUsed ? 1 : 0 };
+      const stackCandidates = [...byPos.RB, ...byPos.WR, ...byPos.TE].filter(
+        p => p.team === qbTeam && !used.has(p.id) &&
+             p.salary <= salaryLeft - remainingSlotsAfter(filledSoFar) * 3000
+      );
+      if (stackCandidates.length === 0) break;
       stackCandidates.sort((a, b) => weight(b) - weight(a));
       const partner = pickWeighted(stackCandidates, rng, topK);
-      if (place(partner)) stackSatisfied = true;
+      if (place(partner)) placedCount++;
+      else break; // no room left for another teammate (position + FLEX both full)
     }
+    stackSatisfied = placedCount >= stackSize;
   }
 
   // 3. If bring-back required, try to lock a player from QB's opponent team
@@ -809,13 +850,17 @@ function buildOneLineup(pool, opts) {
  * salary <= cap and (if required) stack/bring-back constraints intact. */
 function improveLineup(lineup, pool, scoreFn, opts = {}) {
   const { requireStack = false, requireBringBack = false, iterations = 60,
-          flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null } = opts;
+          flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1 } = opts;
   let { slots, arr } = lineup;
   const usedIds = new Set(arr.map(p => p.id));
 
   function qbTeamOf(arrX) { const qb = arrX.find(p => p.position === "QB"); return qb ? qb.team : null; }
   function qbOppOf(arrX) { const qb = arrX.find(p => p.position === "QB"); return qb ? oppTeam(qb) : null; }
-  function hasStackArr(arrX) { const t = qbTeamOf(arrX); return arrX.some(p => p.position !== "QB" && p.team === t); }
+  function hasStackArr(arrX) {
+    const t = qbTeamOf(arrX);
+    const count = arrX.filter(p => p.position !== "QB" && p.team === t).length;
+    return count >= stackSize;
+  }
   function hasBringBackArr(arrX) { const o = qbOppOf(arrX); return arrX.some(p => p.position !== "QB" && p.team === o); }
 
   const slotKeyOf = (p, slots) => {
@@ -1075,7 +1120,7 @@ function overlapCount(a, b) {
 function generateCorrelatedLineups(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, bringBackShare = 0.5,
           maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
-          flexEligible = FLEX_ELIGIBLE, stackTeams = null } = opts;
+          flexEligible = FLEX_ELIGIBLE, stackTeams = null, stackSize = 1 } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
   const qbTeamFilter = (stackTeams && stackTeams.length > 0) ? new Set(stackTeams) : null;
@@ -1092,12 +1137,12 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   for (let i = 0; i < poolAttempts; i++) {
     const wantBringBack = rng() < bringBackShare;
     const built = buildOneLineup(players, {
-      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter,
+      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize,
       requireStack: true, requireBringBack: wantBringBack,
     });
     if (!built) continue;
     const improved = improveLineup(built, players, leverageScore, {
-      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter,
+      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize,
     });
     const sig = signature(improved.arr);
     if (seenSigs.has(sig)) continue;
@@ -1177,6 +1222,7 @@ if (typeof window !== "undefined") {
     sliderSmallOwn: document.getElementById("sliderSmallOwn"),
     sliderLargeOwn: document.getElementById("sliderLargeOwn"),
     sliderBringback: document.getElementById("sliderBringback"),
+    sliderStackSize: document.getElementById("sliderStackSize"),
     sliderExposure: document.getElementById("sliderExposure"),
     sliderGppCount: document.getElementById("sliderGppCount"),
     toggleTEFlex: document.getElementById("toggleTEFlex"),
@@ -1187,6 +1233,7 @@ if (typeof window !== "undefined") {
     valSmallOwn: document.getElementById("valSmallOwn"),
     valLargeOwn: document.getElementById("valLargeOwn"),
     valBringback: document.getElementById("valBringback"),
+    valStackSize: document.getElementById("valStackSize"),
     valExposure: document.getElementById("valExposure"),
     valGppCount: document.getElementById("valGppCount"),
     tabCountSmall: document.getElementById("tabCountSmall"),
@@ -1195,6 +1242,7 @@ if (typeof window !== "undefined") {
     pasteArea: document.getElementById("pasteArea"),
     pasteText: document.getElementById("pasteText"),
     pasteLoadBtn: document.getElementById("pasteLoadBtn"),
+    resetBtn: document.getElementById("resetBtn"),
   };
 
   let activeTab = "proj";
@@ -1212,6 +1260,9 @@ if (typeof window !== "undefined") {
   bindSlider(els.sliderSmallOwn, els.valSmallOwn, "%");
   bindSlider(els.sliderLargeOwn, els.valLargeOwn, "%");
   bindSlider(els.sliderBringback, els.valBringback, "%");
+  els.sliderStackSize.addEventListener("input", () => {
+    els.valStackSize.textContent = "QB + " + els.sliderStackSize.value;
+  });
   bindSlider(els.sliderExposure, els.valExposure, "%");
   els.sliderGppCount.addEventListener("input", () => {
     els.valGppCount.textContent = els.sliderGppCount.value;
@@ -1269,6 +1320,33 @@ if (typeof window !== "undefined") {
       return;
     }
     loadCsvText(text, "pasted data");
+  });
+
+  els.resetBtn.addEventListener("click", () => {
+    state.players = null;
+    state.results = { proj: null, ceil: null, small: null, large: null };
+    state.selectedTeams = new Set();
+
+    els.fileInput.value = "";
+    els.fileStatus.textContent = "No file loaded yet";
+    els.fileStatus.className = "file-status";
+    els.generateBtn.disabled = true;
+    els.exportBtn.disabled = true;
+
+    els.pasteText.value = "";
+    els.pasteArea.style.display = "none";
+    els.pasteToggle.textContent = "Trouble picking a file? Paste CSV text instead ▾";
+
+    els.teamChipGrid.innerHTML = "";
+    els.teamPickerGroup.style.display = "none";
+    updateTeamPickerCount();
+
+    updateTabCounts();
+    setStatus("");
+    activeTab = "proj";
+    els.tabbar.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    document.querySelector('[data-tab="proj"]').classList.add("active");
+    render();
   });
 
   function populateTeamChips(players) {
@@ -1335,10 +1413,11 @@ if (typeof window !== "undefined") {
           const smallOwn = parseInt(els.sliderSmallOwn.value, 10) / 100;
           const bbShare = parseInt(els.sliderBringback.value, 10) / 100;
           const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
+          const stackSize = parseInt(els.sliderStackSize.value, 10);
           state.results.small = eng.generateCorrelatedLineups(players, n, {
             poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible,
             ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
-            stackTeams: [...state.selectedTeams],
+            stackTeams: [...state.selectedTeams], stackSize,
           });
           setStatus("Generating Large Field GPP lineups...");
           setTimeout(() => {
@@ -1346,7 +1425,7 @@ if (typeof window !== "undefined") {
             state.results.large = eng.generateCorrelatedLineups(players, n, {
               poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible,
               ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
-              stackTeams: [...state.selectedTeams],
+              stackTeams: [...state.selectedTeams], stackSize,
             });
             setStatus("Done.");
             els.generateBtn.disabled = false;
@@ -1414,9 +1493,10 @@ if (typeof window !== "undefined") {
 
     let badgesHtml = "";
     if (showBadges) {
-      const hasStack = arr.some(p => p.position !== "QB" && p.team === qbTeam);
+      const stackCount = arr.filter(p => p.position !== "QB" && p.team === qbTeam).length;
       const hasBB = arr.some(p => p.position !== "QB" && p.team === qbOpp);
-      if (hasStack) badgesHtml += `<span class="badge stack">STACK</span>`;
+      if (stackCount >= 2) badgesHtml += `<span class="badge stack">${stackCount + 1}-STACK</span>`;
+      else if (stackCount === 1) badgesHtml += `<span class="badge stack">STACK</span>`;
       if (hasBB) badgesHtml += `<span class="badge bringback">BRING-BACK</span>`;
     }
 

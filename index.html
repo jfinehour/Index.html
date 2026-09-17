@@ -81,6 +81,46 @@ header.hero {
   font-size: 13.5px;
 }
 
+.platform-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.platform-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.platform-chip {
+  border: 1px solid var(--line);
+  background: var(--bg-panel-raised);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 9px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.platform-chip .platform-cap {
+  font-weight: 500;
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.platform-chip.selected {
+  background: var(--amber-dim);
+  border-color: var(--amber);
+  color: #FCEFD4;
+}
+.platform-chip.selected .platform-cap { color: #E8C58A; }
+
 /* ---------- File upload ---------- */
 .upload-row {
   margin-top: 16px;
@@ -569,6 +609,19 @@ table.exposure-table td.num { text-align: right; }
     </svg>
     <p class="hero-sub">DFS lineup builder — Projection, Ceiling &amp; GPP correlation, all on-device.</p>
 
+    <div class="platform-row">
+      <span class="platform-label">Platform</span>
+      <button type="button" class="platform-chip selected" id="platformDK" data-platform="dk">DraftKings <span class="platform-cap">$50,000</span></button>
+      <button type="button" class="platform-chip" id="platformFD" data-platform="fd">FanDuel <span class="platform-cap">$60,000</span></button>
+    </div>
+
+    <div class="platform-row">
+      <span class="platform-label">Contest</span>
+      <button type="button" class="platform-chip selected" id="contestClassic" data-contest="classic">Classic</button>
+      <button type="button" class="platform-chip" id="contestShowdown" data-contest="showdown">Showdown <span class="platform-cap">CPT + 5</span></button>
+    </div>
+    <p class="slider-note" id="showdownFDNote" style="display:none; margin-top:6px;">FanDuel Showdown isn't supported yet — switching Platform to DraftKings.</p>
+
     <div class="source-manager">
       <div class="source-row" data-slot="1">
         <span class="source-label">Site 1</span>
@@ -640,7 +693,7 @@ table.exposure-table td.num { text-align: right; }
         <div class="slider-note">Large-field GPPs reward differentiation — default fades chalk harder than Small Field.</div>
       </div>
 
-      <div class="slider-group">
+      <div class="slider-group" id="stackSizeGroup">
         <div class="slider-label"><b>Stack size</b><span class="val" id="valStackSize">QB + 1</span></div>
         <input type="range" id="sliderStackSize" min="1" max="3" value="1" step="1">
         <div class="slider-note">Number of same-team teammates rostered alongside the QB. Push to 2 or 3 to target games you expect to blow past the Vegas total.</div>
@@ -664,7 +717,7 @@ table.exposure-table td.num { text-align: right; }
         </div>
       </div>
 
-      <div class="slider-group">
+      <div class="slider-group" id="bringbackGroup">
         <div class="slider-label"><b>Bring-back rate</b><span class="val" id="valBringback">50%</span></div>
         <input type="range" id="sliderBringback" min="0" max="100" value="50">
         <div class="slider-note">Share of GPP lineups that also roster a player from the QB's opponent (game stack).</div>
@@ -682,7 +735,7 @@ table.exposure-table td.num { text-align: right; }
         <div class="slider-note">Applies to both Small Field and Large Field buckets.</div>
       </div>
 
-      <div class="slider-group toggle-group">
+      <div class="slider-group toggle-group" id="teFlexGroup">
         <label class="toggle-row" for="toggleTEFlex">
           <span><b>Allow TE in FLEX</b><div class="slider-note" style="margin-top:2px;">Unchecked keeps FLEX to RB/WR only (no double-TE lineups).</div></span>
           <input type="checkbox" id="toggleTEFlex" checked>
@@ -742,7 +795,7 @@ const COLUMN_ALIASES = {
   position: ["position", "dk pos", "pos", "roster position"],
   salary: ["salary", "dk salary", "sal"],
   proj: ["projection", "dk proj", "proj", "median"],
-  own: ["ownership", "small field", "own%", "ownership%", "own"],
+  own: ["ownership", "small field", "own%", "ownership%", "own", "total own"],
   ownLarge: ["large field"],
   floor: ["floor", "dk floor"],
   ceiling: ["ceiling", "dk ceiling", "ceil"],
@@ -794,7 +847,7 @@ function resolveColumns(headerRow) {
     colmap[logical] = idx; // may be -1 if optional (ownLarge, floor)
   }
   // floor is optional: some projection sources only provide proj + ceiling
-  const required = ["name", "team", "opp", "position", "salary", "proj", "own", "ceiling"];
+  const required = ["name", "team", "position", "salary", "proj", "own", "ceiling"];
   for (const r of required) {
     if (colmap[r] === -1 || colmap[r] === undefined) {
       throw new Error(`Could not find a column for "${r}" in header: ${headerRow.join(", ")}`);
@@ -841,11 +894,18 @@ function parseVegasLines(text) {
   return { impliedTotal, avgGameTotal: totalCount > 0 ? totalSum / totalCount : 0 };
 }
 
+const POSITION_ALIASES = { DEF: "DST", D: "DST", DST: "DST" };
+function normalizePosition(raw) {
+  const up = raw.trim().toUpperCase();
+  return POSITION_ALIASES[up] || up;
+}
+
 function loadPlayers(csvText) {
   const rows = parseCSV(csvText);
   const header = rows[0];
   const colmap = resolveColumns(header);
   const hasFloor = colmap.floor !== -1 && colmap.floor !== undefined;
+  const hasOpp = colmap.opp !== -1 && colmap.opp !== undefined;
   const players = [];
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
@@ -854,8 +914,8 @@ function loadPlayers(csvText) {
       id: i - 1,
       name: r[colmap.name].trim(),
       team: r[colmap.team].trim(),
-      opp: r[colmap.opp].trim(),
-      position: r[colmap.position].trim().toUpperCase(),
+      opp: hasOpp ? r[colmap.opp].trim() : "",
+      position: normalizePosition(r[colmap.position]),
       salary: cleanNumber(r[colmap.salary]),
       proj: cleanNumber(r[colmap.proj]),
       own: cleanNumber(r[colmap.own]),
@@ -871,6 +931,17 @@ function loadPlayers(csvText) {
     if (!p.name || isNaN(p.salary) || isNaN(p.proj)) continue;
     players.push(p);
   }
+
+  // Showdown/single-game exports often omit Opp entirely, since there's
+  // only one game on the slate — derive it as "whichever other team is
+  // present" when exactly two teams show up in the file.
+  if (!hasOpp) {
+    const teams = [...new Set(players.map(p => p.team))];
+    if (teams.length === 2) {
+      for (const p of players) p.opp = teams.find(t => t !== p.team);
+    }
+  }
+
   return players;
 }
 
@@ -979,7 +1050,7 @@ function buildOneLineup(pool, opts) {
   const { scoreFn, rng, noise = 0.15, requireStack = false, requireBringBack = false,
           exposure = new Map(), maxExposure = null, topK = 5,
           flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1,
-          vegasContext = null } = opts;
+          vegasContext = null, salaryCap = SALARY_CAP } = opts;
 
   const byPos = { QB: [], RB: [], WR: [], TE: [], DST: [] };
   for (const p of pool) if (byPos[p.position]) byPos[p.position].push(p);
@@ -987,7 +1058,7 @@ function buildOneLineup(pool, opts) {
 
   const used = new Set();
   const slots = emptySlots();
-  let salaryLeft = SALARY_CAP;
+  let salaryLeft = salaryCap;
   let qbTeam = null, qbOppTeam = null;
   let stackSatisfied = !requireStack;
   let bringBackSatisfied = !requireBringBack;
@@ -1139,7 +1210,7 @@ function buildOneLineup(pool, opts) {
 
   const arr = lineupArray(slots);
   if (arr.length !== 9) return null;
-  if (lineupSalary(arr) > SALARY_CAP) return null;
+  if (lineupSalary(arr) > salaryCap) return null;
   return { slots, arr };
 }
 
@@ -1147,7 +1218,8 @@ function buildOneLineup(pool, opts) {
  * salary <= cap and (if required) stack/bring-back constraints intact. */
 function improveLineup(lineup, pool, scoreFn, opts = {}) {
   const { requireStack = false, requireBringBack = false, iterations = 60,
-          flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1 } = opts;
+          flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1,
+          salaryCap = SALARY_CAP } = opts;
   let { slots, arr } = lineup;
   const usedIds = new Set(arr.map(p => p.id));
 
@@ -1174,7 +1246,7 @@ function improveLineup(lineup, pool, scoreFn, opts = {}) {
       const slotKey = slotKeyOf(p, slots);
       if (!slotKey) continue;
       const eligiblePosSet = slotKey === "FLEX" ? flexEligible : new Set([slotKey]);
-      const salaryLeftIfRemoved = SALARY_CAP - lineupSalary(arr) + p.salary;
+      const salaryLeftIfRemoved = salaryCap - lineupSalary(arr) + p.salary;
       let candidates = pool.filter(
         c => eligiblePosSet.has(c.position) && !usedIds.has(c.id) && c.salary <= salaryLeftIfRemoved
       );
@@ -1192,7 +1264,7 @@ function improveLineup(lineup, pool, scoreFn, opts = {}) {
         const newArr = lineupArray(slots);
         const newStackOk = !requireStack || hasStackArr(newArr);
         const newBBOk = !requireBringBack || hasBringBackArr(newArr);
-        if (lineupSalary(newArr) <= SALARY_CAP && newStackOk && newBBOk) {
+        if (lineupSalary(newArr) <= salaryCap && newStackOk && newBBOk) {
           usedIds.delete(p.id); usedIds.add(best.id);
           arr = newArr;
           improved = true;
@@ -1471,9 +1543,9 @@ function generateTopN(players, metricFn, n, opts = {}) {
   }
 
   for (let i = 0; i < attempts; i++) {
-    const built = buildOneLineup(players, { scoreFn: metricFn, rng, noise: 0.10, flexEligible });
+    const built = buildOneLineup(players, { scoreFn: metricFn, rng, noise: 0.10, flexEligible, salaryCap, qbTeamFilter });
     if (!built) continue;
-    const improved = improveLineup(built, players, metricFn, { flexEligible });
+    const improved = improveLineup(built, players, metricFn, { flexEligible, salaryCap, qbTeamFilter });
     consider(improved.arr);
   }
 
@@ -1490,7 +1562,7 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, bringBackShare = 0.5,
           maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
           flexEligible = FLEX_ELIGIBLE, stackTeams = null, stackSize = 1,
-          vegasContext = null } = opts;
+          vegasContext = null, salaryCap = SALARY_CAP } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
   const qbTeamFilter = (stackTeams && stackTeams.length > 0) ? new Set(stackTeams) : null;
@@ -1507,12 +1579,12 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   for (let i = 0; i < poolAttempts; i++) {
     const wantBringBack = rng() < bringBackShare;
     const built = buildOneLineup(players, {
-      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize, vegasContext,
+      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize, vegasContext, salaryCap,
       requireStack: true, requireBringBack: wantBringBack,
     });
     if (!built) continue;
     const improved = improveLineup(built, players, leverageScore, {
-      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize,
+      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize, salaryCap,
     });
     const sig = signature(improved.arr);
     if (seenSigs.has(sig)) continue;
@@ -1553,12 +1625,281 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   return accepted.slice(0, n);
 }
 
+/* =====================================================================
+   DraftKings Showdown (Captain Mode)
+   Roster: 1 CPT (1.5x salary, 1.5x score) + 5 FLEX, any position eligible
+   anywhere. Must include >=1 player from each of the two teams present.
+   ===================================================================== */
+
+function showdownSignature(arr) {
+  const ids = arr.map(p => p.id).sort((a, b) => a - b).join(",");
+  const cpt = arr.find(p => p.isCaptain);
+  return ids + "|C" + (cpt ? cpt.id : "");
+}
+
+function showdownSalary(arr) {
+  return arr.reduce((s, p) => s + (p.isCaptain ? p.salary * 1.5 : p.salary), 0);
+}
+
+function showdownScore(arr, scoreFn) {
+  return arr.reduce((s, p) => s + scoreFn(p) * (p.isCaptain ? 1.5 : 1), 0);
+}
+
+/** Exact solve: iterate every possible Captain, exactly knapsack-solve the
+ * best 5 FLEX for each, handling the both-teams-required constraint via a
+ * "force in the best required-team player" fallback when the unconstrained
+ * optimum doesn't naturally include both teams. */
+function solveExactShowdownOptimal(players, scoreFn, opts = {}) {
+  const salaryCap = opts.salaryCap || 50000;
+  const BUCKET = 100;
+  const teams = [...new Set(players.map(p => p.team))];
+  let best = null;
+
+  for (const cpt of players) {
+    const cptEffectiveSalary = cpt.salary * 1.5;
+    if (cptEffectiveSalary > salaryCap) continue;
+    const cptEffectiveScore = scoreFn(cpt) * 1.5;
+
+    const remainingBudget = salaryCap - cptEffectiveSalary;
+    const capBucket = Math.floor(remainingBudget / BUCKET);
+    const restPool = players.filter(p => p.id !== cpt.id);
+
+    const table = boundedKnapsackTable(restPool, 5, capBucket, scoreFn);
+    const uncTop = table.dp[5][capBucket];
+    if (uncTop !== -Infinity) {
+      const flex = reconstruct(table, 5, capBucket);
+      const teamsCovered = new Set([cpt.team, ...flex.map(p => p.team)]);
+      if (teams.length < 2 || teamsCovered.size >= 2) {
+        const score = cptEffectiveScore + flex.reduce((s, p) => s + scoreFn(p), 0);
+        const arr = [{ ...cpt, isCaptain: true }, ...flex.map(p => ({ ...p, isCaptain: false }))];
+        const actualSalary = cptEffectiveSalary + flex.reduce((s, p) => s + p.salary, 0);
+        if (actualSalary <= salaryCap && (!best || score > best.score)) best = { arr, score };
+      }
+    }
+
+    if (teams.length === 2) {
+      const otherTeam = teams.find(t => t !== cpt.team);
+      const otherTeamPool = restPool.filter(p => p.team === otherTeam);
+      for (const forced of otherTeamPool) {
+        const b = Math.floor(forced.salary / BUCKET);
+        if (b > capBucket) continue;
+        const remAfter = capBucket - b;
+        const restPool2 = restPool.filter(p => p.id !== forced.id);
+        const table2 = boundedKnapsackTable(restPool2, 4, remAfter, scoreFn);
+        const sub = table2.dp[4][remAfter];
+        if (sub === -Infinity) continue;
+        const rest4 = reconstruct(table2, 4, remAfter);
+        const flex = [forced, ...rest4];
+        const score = cptEffectiveScore + scoreFn(forced) + rest4.reduce((s, p) => s + scoreFn(p), 0);
+        const actualSalary = cptEffectiveSalary + flex.reduce((s, p) => s + p.salary, 0);
+        if (actualSalary <= salaryCap && (!best || score > best.score)) {
+          const arr = [{ ...cpt, isCaptain: true }, ...flex.map(p => ({ ...p, isCaptain: false }))];
+          best = { arr, score };
+        }
+      }
+    }
+  }
+  return best;
+}
+
+/** Randomized heuristic construction: pick a CPT, then 5 FLEX, ensuring
+ * both teams end up represented. */
+function buildShowdownLineup(pool, opts) {
+  const { scoreFn, rng, noise = 0.15, topK = 5, salaryCap = 50000,
+          exposure = new Map(), maxExposure = null } = opts;
+  const teams = [...new Set(pool.map(p => p.team))];
+  const used = new Set();
+  let salaryLeft = salaryCap;
+
+  function weight(p, isCaptain) {
+    let base = scoreFn(p) * (isCaptain ? 1.5 : 1);
+    if (maxExposure != null) {
+      const usedN = exposure.get(p.name) || 0;
+      if (usedN >= maxExposure) base *= 0.25;
+    }
+    return base * (1 + (rng() * 2 - 1) * noise);
+  }
+
+  // 1. Captain
+  let cptCandidates = pool.filter(p => p.salary * 1.5 <= salaryLeft - 5 * 2000);
+  if (cptCandidates.length === 0) return null;
+  cptCandidates.sort((a, b) => weight(b, true) - weight(a, true));
+  const cpt = pickWeighted(cptCandidates, rng, topK);
+  used.add(cpt.id);
+  salaryLeft -= cpt.salary * 1.5;
+
+  // 2. Five FLEX, forcing team coverage on the last pick if still needed
+  const flex = [];
+  for (let i = 0; i < 5; i++) {
+    const remaining = 5 - i;
+    const minFloor = (remaining - 1) * 2000;
+    let candidates = pool.filter(p => !used.has(p.id) && p.salary <= salaryLeft - minFloor);
+    if (remaining === 1 && teams.length >= 2) {
+      const teamsSoFar = new Set([cpt.team, ...flex.map(p => p.team)]);
+      if (teamsSoFar.size < 2) {
+        const missing = teams.find(t => !teamsSoFar.has(t));
+        candidates = candidates.filter(p => p.team === missing);
+      }
+    }
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => weight(b, false) - weight(a, false));
+    const pick = pickWeighted(candidates, rng, topK);
+    used.add(pick.id);
+    salaryLeft -= pick.salary;
+    flex.push(pick);
+  }
+
+  const arr = [{ ...cpt, isCaptain: true }, ...flex.map(p => ({ ...p, isCaptain: false }))];
+  if (showdownSalary(arr) > salaryCap) return null;
+  const teamsCovered = new Set(arr.map(p => p.team));
+  if (teams.length >= 2 && teamsCovered.size < 2) return null;
+  return arr;
+}
+
+/** Exhaustive 1-swap neighborhood: replace one rostered player with any
+ * eligible alternative (respecting role/salary/team constraints), OR
+ * re-assign which already-rostered player is Captain. Both move types
+ * matter — many near-optimal showdown lineups differ only in who's CPT. */
+function swapShowdownNeighbors(arr, pool, scoreFn, opts = {}) {
+  const salaryCap = opts.salaryCap || 50000;
+  const teams = [...new Set(pool.map(p => p.team))];
+  const usedIds = new Set(arr.map(p => p.id));
+  const neighbors = [];
+  const totalSalary = showdownSalary(arr);
+
+  // Move type 1: swap one rostered player for an unrostered one, same role.
+  for (let i = 0; i < arr.length; i++) {
+    const p = arr[i];
+    const removedContribution = p.isCaptain ? p.salary * 1.5 : p.salary;
+    const salaryLeftIfRemoved = salaryCap - totalSalary + removedContribution;
+    for (const c of pool) {
+      if (usedIds.has(c.id)) continue;
+      const newContribution = p.isCaptain ? c.salary * 1.5 : c.salary;
+      if (newContribution > salaryLeftIfRemoved) continue;
+      const newArr = arr.slice();
+      newArr[i] = { ...c, isCaptain: p.isCaptain };
+      if (teams.length >= 2 && new Set(newArr.map(x => x.team)).size < 2) continue;
+      neighbors.push(newArr);
+    }
+  }
+
+  // Move type 2: re-assign Captain to a different already-rostered player.
+  const currentCptIdx = arr.findIndex(p => p.isCaptain);
+  for (let i = 0; i < arr.length; i++) {
+    if (i === currentCptIdx) continue;
+    const newArr = arr.map((p, idx) => ({ ...p, isCaptain: idx === i }));
+    if (showdownSalary(newArr) <= salaryCap) neighbors.push(newArr);
+  }
+
+  return neighbors;
+}
+
+function generateShowdownTopN(players, metricFn, n, opts = {}) {
+  const { attempts = 500, seed = 1, salaryCap = 50000 } = opts;
+  const rng = mulberry32(seed);
+  const results = new Map();
+
+  function consider(arr) {
+    const sig = showdownSignature(arr);
+    const score = showdownScore(arr, metricFn);
+    const existing = results.get(sig);
+    if (!existing || existing.score < score) { results.set(sig, { arr, score }); return true; }
+    return false;
+  }
+
+  let exactSeed = null;
+  try {
+    const exact = solveExactShowdownOptimal(players, metricFn, { salaryCap });
+    if (exact) { consider(exact.arr); exactSeed = exact.arr; }
+  } catch (e) { /* exact solver is a pure enhancement */ }
+
+  let frontier = exactSeed ? [exactSeed] : [];
+  for (let round = 0; round < 3 && frontier.length > 0; round++) {
+    const found = [];
+    for (const seedArr of frontier) {
+      for (const nb of swapShowdownNeighbors(seedArr, players, metricFn, { salaryCap })) {
+        if (consider(nb)) found.push(nb);
+      }
+    }
+    found.sort((a, b) => showdownScore(b, metricFn) - showdownScore(a, metricFn));
+    frontier = found.slice(0, 60);
+  }
+
+  for (let i = 0; i < attempts; i++) {
+    const built = buildShowdownLineup(players, { scoreFn: metricFn, rng, noise: 0.10, salaryCap });
+    if (built) consider(built);
+  }
+
+  const sorted = [...results.values()].sort((a, b) => b.score - a.score);
+  return sorted.slice(0, n).map(r => r.arr);
+}
+
+function showdownOverlapCount(a, b) {
+  const idsB = new Set(b.map(p => p.id));
+  return a.filter(p => idsB.has(p.id)).length;
+}
+
+/** GPP-style diverse lineups for Small/Large Field. No stack/bring-back
+ * requirement — in showdown every player is already from one of the two
+ * teams in the game, so correlation is structurally built in. Just the
+ * ownership-fade leverage score, plus exposure/overlap diversity. */
+function generateShowdownCorrelated(players, n, opts = {}) {
+  const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, ownershipField = "own",
+          maxExposureFraction = 0.4, maxOverlap = 4, salaryCap = 50000 } = opts;
+  const rng = mulberry32(seed);
+  const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
+
+  const leverageScore = (p) => {
+    const ownRaw = p[ownershipField];
+    const own = isNaN(ownRaw) ? 0 : ownRaw;
+    return p.ceiling * (1 - (ownershipWeight * own) / 100);
+  };
+
+  const candidates = [];
+  const seenSigs = new Set();
+  for (let i = 0; i < poolAttempts; i++) {
+    const built = buildShowdownLineup(players, { scoreFn: leverageScore, rng, noise: 0.30, topK: 14, salaryCap });
+    if (!built) continue;
+    const sig = showdownSignature(built);
+    if (seenSigs.has(sig)) continue;
+    seenSigs.add(sig);
+    candidates.push({ arr: built, score: showdownScore(built, leverageScore) });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  const accepted = [];
+  const exposure = new Map();
+
+  function attemptFill(curMaxExposure, curMaxOverlap) {
+    for (const c of candidates) {
+      if (accepted.length >= n) break;
+      if (accepted.includes(c)) continue;
+      if (c.arr.some(p => (exposure.get(p.name) || 0) >= curMaxExposure)) continue;
+      if (accepted.some(a => showdownOverlapCount(a.arr, c.arr) > curMaxOverlap)) continue;
+      accepted.push(c);
+      for (const p of c.arr) exposure.set(p.name, (exposure.get(p.name) || 0) + 1);
+    }
+  }
+
+  const relaxSteps = [
+    [maxExposure, maxOverlap], [maxExposure + 3, maxOverlap + 1],
+    [maxExposure + 6, maxOverlap + 2], [maxExposure + 10, 5], [n, 6],
+  ];
+  for (const [exp, ov] of relaxSteps) {
+    if (accepted.length >= n) break;
+    attemptFill(exp, ov);
+  }
+  return accepted.slice(0, n);
+}
+
 /* ---------------------- Exports (Node + browser) ---------------------- */
 const DFSEngine = {
   parseCSV, resolveColumns, loadPlayers, cleanNumber, SALARY_CAP, ROSTER_SLOTS, FLEX_ELIGIBLE,
   oppTeam, buildOneLineup, improveLineup, mulberry32, lineupSalary, lineupScore, signature,
   overlapCount, generateTopN, generateCorrelatedLineups,
   solveExactOptimal, boundedKnapsackTable, convolve, reconstruct, parseVegasLines, swapNeighbors,
+  solveExactShowdownOptimal, buildShowdownLineup, swapShowdownNeighbors, generateShowdownTopN,
+  generateShowdownCorrelated, showdownSignature, showdownSalary, showdownScore, showdownOverlapCount,
   mergeSources,
 };
 if (typeof module !== "undefined" && module.exports) {
@@ -1575,6 +1916,8 @@ if (typeof window !== "undefined") {
   const eng = window.DFSEngine;
 
   const state = {
+    platform: "dk", // "dk" | "fd"
+    contestType: "classic", // "classic" | "showdown"
     sources: {
       1: { raw: null, players: null, label: null },
       2: { raw: null, players: null, label: null },
@@ -1630,9 +1973,70 @@ if (typeof window !== "undefined") {
     modeChipGrid: document.getElementById("modeChipGrid"),
     blendWeights: document.getElementById("blendWeights"),
     pasteTargetSlot: document.getElementById("pasteTargetSlot"),
+    platformDK: document.getElementById("platformDK"),
+    platformFD: document.getElementById("platformFD"),
+    contestClassic: document.getElementById("contestClassic"),
+    contestShowdown: document.getElementById("contestShowdown"),
+    showdownFDNote: document.getElementById("showdownFDNote"),
+    stackSizeGroup: document.getElementById("stackSizeGroup"),
+    bringbackGroup: document.getElementById("bringbackGroup"),
+    teFlexGroup: document.getElementById("teFlexGroup"),
+    vegasGroup: document.getElementById("vegasGroup"),
   };
 
   let activeTab = "proj";
+
+  /* ---------------- Platform (DraftKings / FanDuel) & Contest type ---------------- */
+  const STORAGE_KEY_PLATFORM = "gridlock_platform";
+  const STORAGE_KEY_CONTEST = "gridlock_contest_type";
+
+  function getSalaryCap() {
+    return state.platform === "fd" ? 60000 : 50000;
+  }
+
+  function setPlatform(p) {
+    if (p === "fd" && state.contestType === "showdown") {
+      // FanDuel Showdown isn't supported yet — drop back to Classic instead.
+      setContestType("classic");
+    }
+    state.platform = p;
+    els.platformDK.classList.toggle("selected", p === "dk");
+    els.platformFD.classList.toggle("selected", p === "fd");
+    try { localStorage.setItem(STORAGE_KEY_PLATFORM, p); } catch (e) { /* ignore */ }
+  }
+
+  function setContestType(c) {
+    if (c === "showdown" && state.platform === "fd") {
+      // Force DraftKings, since FanDuel Showdown isn't supported yet.
+      state.platform = "dk";
+      els.platformDK.classList.add("selected");
+      els.platformFD.classList.remove("selected");
+      try { localStorage.setItem(STORAGE_KEY_PLATFORM, "dk"); } catch (e) { /* ignore */ }
+      els.showdownFDNote.style.display = "block";
+      setTimeout(() => { els.showdownFDNote.style.display = "none"; }, 4000);
+    }
+    state.contestType = c;
+    els.contestClassic.classList.toggle("selected", c === "classic");
+    els.contestShowdown.classList.toggle("selected", c === "showdown");
+    // Classic-only tuning controls don't apply to Showdown (no fixed
+    // positions, so QB-based stacking/bring-back/flex-TE concepts don't map).
+    const showClassicOnly = c === "classic" ? "block" : "none";
+    els.stackSizeGroup.style.display = showClassicOnly;
+    els.bringbackGroup.style.display = showClassicOnly;
+    els.teFlexGroup.style.display = showClassicOnly;
+    els.vegasGroup.style.display = showClassicOnly;
+    if (c === "showdown") {
+      els.teamPickerGroup.style.display = "none";
+    } else if (loadedSlots().length > 0) {
+      updateTeamPickerCount(); // teamPickerGroup visibility already handled by populateTeamChips
+    }
+    try { localStorage.setItem(STORAGE_KEY_CONTEST, c); } catch (e) { /* ignore */ }
+  }
+
+  els.platformDK.addEventListener("click", () => setPlatform("dk"));
+  els.platformFD.addEventListener("click", () => setPlatform("fd"));
+  els.contestClassic.addEventListener("click", () => setContestType("classic"));
+  els.contestShowdown.addEventListener("click", () => setContestType("showdown"));
 
   /* ---------------- Panel toggle ---------------- */
   els.panelToggle.addEventListener("click", () => {
@@ -1996,11 +2400,45 @@ if (typeof window !== "undefined") {
     // Chunk the work with setTimeout so the UI can repaint status between stages.
     setTimeout(() => {
       const players = state.players;
+      const salaryCap = getSalaryCap();
+
+      if (state.contestType === "showdown") {
+        state.results.proj = eng.generateShowdownTopN(players, p => p.proj, 10, { attempts: 500, seed: 1, salaryCap });
+        setStatus("Generating Ceiling lineups...");
+        setTimeout(() => {
+          state.results.ceil = eng.generateShowdownTopN(players, p => p.ceiling, 5, { attempts: 500, seed: 7, salaryCap });
+          setStatus("Generating Small Field GPP lineups...");
+          setTimeout(() => {
+            const n = parseInt(els.sliderGppCount.value, 10);
+            const smallOwn = parseInt(els.sliderSmallOwn.value, 10) / 100;
+            const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
+            state.results.small = eng.generateShowdownCorrelated(players, n, {
+              poolAttempts: 4000, seed: 11, ownershipField: "own", salaryCap,
+              ownershipWeight: smallOwn, maxExposureFraction: expFrac,
+            }).map(r => ({ arr: r.arr, bringBack: false }));
+            setStatus("Generating Large Field GPP lineups...");
+            setTimeout(() => {
+              const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
+              state.results.large = eng.generateShowdownCorrelated(players, n, {
+                poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", salaryCap,
+                ownershipWeight: largeOwn, maxExposureFraction: expFrac,
+              }).map(r => ({ arr: r.arr, bringBack: false }));
+              setStatus("Done.");
+              els.generateBtn.disabled = false;
+              els.exportBtn.disabled = false;
+              updateTabCounts();
+              render();
+            }, 30);
+          }, 30);
+        }, 30);
+        return;
+      }
+
       const flexEligible = els.toggleTEFlex.checked ? new Set(["RB", "WR", "TE"]) : new Set(["RB", "WR"]);
-      state.results.proj = eng.generateTopN(players, p => p.proj, 10, { attempts: 500, seed: 1, flexEligible });
+      state.results.proj = eng.generateTopN(players, p => p.proj, 10, { attempts: 500, seed: 1, flexEligible, salaryCap });
       setStatus("Generating Ceiling lineups...");
       setTimeout(() => {
-        state.results.ceil = eng.generateTopN(players, p => p.ceiling, 5, { attempts: 500, seed: 7, flexEligible });
+        state.results.ceil = eng.generateTopN(players, p => p.ceiling, 5, { attempts: 500, seed: 7, flexEligible, salaryCap });
         setStatus("Generating Small Field GPP lineups...");
         setTimeout(() => {
           const n = parseInt(els.sliderGppCount.value, 10);
@@ -2009,7 +2447,7 @@ if (typeof window !== "undefined") {
           const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
           const stackSize = parseInt(els.sliderStackSize.value, 10);
           state.results.small = eng.generateCorrelatedLineups(players, n, {
-            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible,
+            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap,
             ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
             stackTeams: [...state.selectedTeams], stackSize, vegasContext: state.vegasContext,
           });
@@ -2017,7 +2455,7 @@ if (typeof window !== "undefined") {
           setTimeout(() => {
             const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
             state.results.large = eng.generateCorrelatedLineups(players, n, {
-              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible,
+              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap,
               ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
               stackTeams: [...state.selectedTeams], stackSize, vegasContext: state.vegasContext,
             });
@@ -2047,13 +2485,18 @@ if (typeof window !== "undefined") {
   /* ---------------- Rendering ---------------- */
   function fmtMoney(n) { return "$" + Math.round(n).toLocaleString("en-US"); }
   function fmtNum(n) { return (Math.round(n * 10) / 10).toFixed(1); }
+  function fmtNumOrDash(n) { return (n != null && !isNaN(n)) ? fmtNum(n) : "—"; }
+  function sumOrNaN(arr, fn) {
+    const vals = arr.map(fn).filter(v => v != null && !isNaN(v));
+    return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) : NaN;
+  }
 
   function lineupTotals(arr, ownField = "own") {
     return {
       salary: arr.reduce((s, p) => s + p.salary, 0),
       proj: arr.reduce((s, p) => s + p.proj, 0),
       own: arr.reduce((s, p) => s + (p[ownField] != null && !isNaN(p[ownField]) ? p[ownField] : 0), 0),
-      floor: arr.reduce((s, p) => s + p.floor, 0),
+      floor: sumOrNaN(arr, p => p.floor),
       ceiling: arr.reduce((s, p) => s + p.ceiling, 0),
     };
   }
@@ -2107,7 +2550,7 @@ if (typeof window !== "undefined") {
         <td class="num">${fmtMoney(p.salary)}</td>
         <td class="num">${fmtNum(p.proj)}</td>
         <td class="num">${(ownVal != null && !isNaN(ownVal)) ? fmtNum(ownVal) + "%" : "—"}</td>
-        <td class="num">${fmtNum(p.floor)}</td>
+        <td class="num">${fmtNumOrDash(p.floor)}</td>
         <td class="num">${fmtNum(p.ceiling)}</td>
       </tr>`;
     }).join("");
@@ -2126,7 +2569,67 @@ if (typeof window !== "undefined") {
             <td class="num">${fmtMoney(totals.salary)}</td>
             <td class="num">${fmtNum(totals.proj)}</td>
             <td class="num">${fmtNum(totals.own)}%</td>
-            <td class="num">${fmtNum(totals.floor)}</td>
+            <td class="num">${fmtNumOrDash(totals.floor)}</td>
+            <td class="num">${fmtNum(totals.ceiling)}</td>
+          </tr>
+        </tbody>
+      </table></div>
+    </div>`;
+  }
+
+  /* ---------------- Showdown rendering ---------------- */
+  function showdownSlotOrder(arr) {
+    const cpt = arr.find(p => p.isCaptain);
+    const flex = arr.filter(p => !p.isCaptain);
+    return [{ p: cpt, slot: "CPT" }, ...flex.map(p => ({ p, slot: "FLEX" }))];
+  }
+
+  function showdownLineupTotals(arr, ownField = "own") {
+    return {
+      salary: eng.showdownSalary(arr),
+      proj: eng.showdownScore(arr, p => p.proj),
+      own: arr.reduce((s, p) => s + (p[ownField] != null && !isNaN(p[ownField]) ? p[ownField] : 0), 0),
+      floor: sumOrNaN(arr, p => p.floor * (p.isCaptain ? 1.5 : 1)),
+      ceiling: eng.showdownScore(arr, p => p.ceiling),
+    };
+  }
+
+  function renderShowdownLineupCard(arr, idx, opts = {}) {
+    const { ownField = "own" } = opts;
+    const totals = showdownLineupTotals(arr, ownField);
+    const withSlot = showdownSlotOrder(arr);
+
+    const rows = withSlot.map(({ p, slot }) => {
+      const ownVal = p[ownField];
+      const displaySalary = p.isCaptain ? p.salary * 1.5 : p.salary;
+      const rowClass = p.isCaptain ? "stack-row" : "";
+      return `<tr class="${rowClass}">
+        <td class="slot">${slot}</td>
+        <td>${escapeHtml(p.name)}${p.isCaptain ? ' <span class="badge stack" style="margin-left:4px;">1.5x</span>' : ""}</td>
+        <td>${escapeHtml(p.team)}</td>
+        <td>${escapeHtml(p.opp)}</td>
+        <td class="num">${fmtMoney(displaySalary)}</td>
+        <td class="num">${fmtNum(p.proj)}</td>
+        <td class="num">${(ownVal != null && !isNaN(ownVal)) ? fmtNum(ownVal) + "%" : "—"}</td>
+        <td class="num">${fmtNumOrDash(p.floor)}</td>
+        <td class="num">${fmtNum(p.ceiling)}</td>
+      </tr>`;
+    }).join("");
+
+    return `<div class="lineup-card">
+      <div class="lineup-head">
+        <span class="num">Lineup ${String(idx + 1).padStart(2, "0")}</span>
+      </div>
+      <div class="table-scroll"><table class="lineup-table">
+        <thead><tr><th></th><th>Player</th><th>Tm</th><th>Opp</th><th>Sal</th><th>Proj</th><th>Own</th><th>Flr</th><th>Ceil</th></tr></thead>
+        <tbody>
+          ${rows}
+          <tr class="totals-row">
+            <td class="label" colspan="4">TOTALS</td>
+            <td class="num">${fmtMoney(totals.salary)}</td>
+            <td class="num">${fmtNum(totals.proj)}</td>
+            <td class="num">${fmtNum(totals.own)}%</td>
+            <td class="num">${fmtNumOrDash(totals.floor)}</td>
             <td class="num">${fmtNum(totals.ceiling)}</td>
           </tr>
         </tbody>
@@ -2183,17 +2686,22 @@ if (typeof window !== "undefined") {
 
   function render() {
     let html = "";
+    const isShowdown = state.contestType === "showdown";
     if (activeTab === "proj") {
       if (!state.results.proj) html = emptyState();
+      else if (isShowdown) html = state.results.proj.map((arr, i) => renderShowdownLineupCard(arr, i, { ownField: "own" })).join("");
       else html = state.results.proj.map((arr, i) => renderLineupCard(arr, i, { showBadges: false, ownField: "own" })).join("");
     } else if (activeTab === "ceil") {
       if (!state.results.ceil) html = emptyState();
+      else if (isShowdown) html = state.results.ceil.map((arr, i) => renderShowdownLineupCard(arr, i, { ownField: "own" })).join("");
       else html = state.results.ceil.map((arr, i) => renderLineupCard(arr, i, { showBadges: false, ownField: "own" })).join("");
     } else if (activeTab === "small") {
       if (!state.results.small) html = emptyState();
+      else if (isShowdown) html = state.results.small.map((r, i) => renderShowdownLineupCard(r.arr, i, { ownField: "own" })).join("");
       else html = state.results.small.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true, ownField: "own" })).join("");
     } else if (activeTab === "large") {
       if (!state.results.large) html = emptyState();
+      else if (isShowdown) html = state.results.large.map((r, i) => renderShowdownLineupCard(r.arr, i, { ownField: "ownLarge" })).join("");
       else html = state.results.large.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true, ownField: "ownLarge" })).join("");
     } else if (activeTab === "exposure") {
       html = renderExposureTab();
@@ -2209,22 +2717,33 @@ if (typeof window !== "undefined") {
   els.exportBtn.addEventListener("click", () => {
     const lines = [];
     const cols = ["Name", "Team", "Opp", "Position", "Salary", "Projection", "Ownership", "Floor", "Ceiling"];
+    const isShowdown = state.contestType === "showdown";
+    function round1(n) { return (n != null && !isNaN(n)) ? Math.round(n * 10) / 10 : ""; }
+    function cellOrBlank(n) { return (n != null && !isNaN(n)) ? n : ""; }
 
     function pushBucket(title, arrs, ownField) {
       lines.push([title]);
       lines.push([]);
       arrs.forEach((arr, i) => {
-        const totals = lineupTotals(arr, ownField);
         lines.push([`Lineup #${i + 1}`]);
         lines.push(["Slot", ...cols]);
-        slotOrder(arr).forEach(({ p, slot }) => {
-          lines.push([slot, p.name, p.team, p.opp, p.position, p.salary, p.proj, p[ownField], p.floor, p.ceiling]);
-        });
-        lines.push(["TOTALS", "", "", "", "", totals.salary, round1(totals.proj), round1(totals.own), round1(totals.floor), round1(totals.ceiling)]);
+        if (isShowdown) {
+          const totals = showdownLineupTotals(arr, ownField);
+          showdownSlotOrder(arr).forEach(({ p, slot }) => {
+            const displaySalary = p.isCaptain ? p.salary * 1.5 : p.salary;
+            lines.push([slot, p.name, p.team, p.opp, p.position, displaySalary, p.proj, p[ownField], cellOrBlank(p.floor), p.ceiling]);
+          });
+          lines.push(["TOTALS", "", "", "", "", totals.salary, round1(totals.proj), round1(totals.own), round1(totals.floor), round1(totals.ceiling)]);
+        } else {
+          const totals = lineupTotals(arr, ownField);
+          slotOrder(arr).forEach(({ p, slot }) => {
+            lines.push([slot, p.name, p.team, p.opp, p.position, p.salary, p.proj, p[ownField], cellOrBlank(p.floor), p.ceiling]);
+          });
+          lines.push(["TOTALS", "", "", "", "", totals.salary, round1(totals.proj), round1(totals.own), round1(totals.floor), round1(totals.ceiling)]);
+        }
         lines.push([]);
       });
     }
-    function round1(n) { return Math.round(n * 10) / 10; }
 
     if (state.results.proj) pushBucket("TOP 10 — PROJECTION", state.results.proj, "own");
     if (state.results.ceil) pushBucket("TOP 5 — CEILING", state.results.ceil, "own");
@@ -2253,6 +2772,13 @@ if (typeof window !== "undefined") {
 
   /* ---------------- Restore persisted data on load ---------------- */
   (function restoreFromStorage() {
+    try {
+      const savedPlatform = localStorage.getItem(STORAGE_KEY_PLATFORM);
+      if (savedPlatform === "fd" || savedPlatform === "dk") setPlatform(savedPlatform);
+      const savedContest = localStorage.getItem(STORAGE_KEY_CONTEST);
+      if (savedContest === "classic" || savedContest === "showdown") setContestType(savedContest);
+    } catch (e) { /* ignore */ }
+
     const savedMode = safeStorageGet(STORAGE_KEY_MODE);
     const savedWeightsRaw = safeStorageGet(STORAGE_KEY_WEIGHTS);
     if (savedWeightsRaw) {

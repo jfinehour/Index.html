@@ -704,6 +704,12 @@ table.exposure-table td.num { text-align: right; }
     <div class="panel-body" id="panelBody">
 
       <div class="slider-group">
+        <div class="slider-label"><b>Leverage ceiling weight</b><span class="val" id="valCeilingWeight">100% Ceiling</span></div>
+        <input type="range" id="sliderCeilingWeight" min="0" max="100" value="100">
+        <div class="slider-note">Blends Ceiling and Projection for the leverage score used to build Small/Large Field lineups. 100% is pure ceiling (max upside, more volatile); lower it to temper leverage with a player's median outcome too.</div>
+      </div>
+
+      <div class="slider-group">
         <div class="slider-label"><b>Small Field ownership fade</b><span class="val" id="valSmallOwn">20%</span></div>
         <input type="range" id="sliderSmallOwn" min="0" max="100" value="20">
         <div class="slider-note">Higher = discounts high-owned Small Field chalk more when scoring ceiling leverage.</div>
@@ -1584,7 +1590,7 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, bringBackShare = 0.5,
           maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
           flexEligible = FLEX_ELIGIBLE, stackTeams = null, stackSize = 1,
-          vegasContext = null, salaryCap = SALARY_CAP } = opts;
+          vegasContext = null, salaryCap = SALARY_CAP, ceilingWeight = 1.0 } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
   const qbTeamFilter = (stackTeams && stackTeams.length > 0) ? new Set(stackTeams) : null;
@@ -1592,7 +1598,8 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   const leverageScore = (p) => {
     const ownRaw = p[ownershipField];
     const own = isNaN(ownRaw) ? 0 : ownRaw;
-    return p.ceiling * (1 - (ownershipWeight * own) / 100);
+    const blended = ceilingWeight * p.ceiling + (1 - ceilingWeight) * p.proj;
+    return blended * (1 - (ownershipWeight * own) / 100);
   };
 
   // Phase 1: generate a large pool of valid, stack-satisfying candidates
@@ -1867,14 +1874,15 @@ function showdownOverlapCount(a, b) {
  * ownership-fade leverage score, plus exposure/overlap diversity. */
 function generateShowdownCorrelated(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, ownershipField = "own",
-          maxExposureFraction = 0.4, maxOverlap = 4, salaryCap = 50000 } = opts;
+          maxExposureFraction = 0.4, maxOverlap = 4, salaryCap = 50000, ceilingWeight = 1.0 } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
 
   const leverageScore = (p) => {
     const ownRaw = p[ownershipField];
     const own = isNaN(ownRaw) ? 0 : ownRaw;
-    return p.ceiling * (1 - (ownershipWeight * own) / 100);
+    const blended = ceilingWeight * p.ceiling + (1 - ceilingWeight) * p.proj;
+    return blended * (1 - (ownershipWeight * own) / 100);
   };
 
   const candidates = [];
@@ -1964,6 +1972,7 @@ if (typeof window !== "undefined") {
     generateBtn: document.getElementById("generateBtn"),
     exportBtn: document.getElementById("exportBtn"),
     sliderSmallOwn: document.getElementById("sliderSmallOwn"),
+    sliderCeilingWeight: document.getElementById("sliderCeilingWeight"),
     sliderLargeOwn: document.getElementById("sliderLargeOwn"),
     sliderBringback: document.getElementById("sliderBringback"),
     sliderStackSize: document.getElementById("sliderStackSize"),
@@ -1975,6 +1984,7 @@ if (typeof window !== "undefined") {
     teamPickerCount: document.getElementById("teamPickerCount"),
     teamPickerClear: document.getElementById("teamPickerClear"),
     valSmallOwn: document.getElementById("valSmallOwn"),
+    valCeilingWeight: document.getElementById("valCeilingWeight"),
     valLargeOwn: document.getElementById("valLargeOwn"),
     valBringback: document.getElementById("valBringback"),
     valStackSize: document.getElementById("valStackSize"),
@@ -2072,6 +2082,10 @@ if (typeof window !== "undefined") {
     slider.addEventListener("input", () => { label.textContent = slider.value + suffix; });
   }
   bindSlider(els.sliderSmallOwn, els.valSmallOwn, "%");
+  els.sliderCeilingWeight.addEventListener("input", () => {
+    const cw = parseInt(els.sliderCeilingWeight.value, 10);
+    els.valCeilingWeight.textContent = cw === 100 ? "100% Ceiling" : `${cw}% Ceil / ${100 - cw}% Proj`;
+  });
   bindSlider(els.sliderLargeOwn, els.valLargeOwn, "%");
   bindSlider(els.sliderBringback, els.valBringback, "%");
   els.sliderStackSize.addEventListener("input", () => {
@@ -2436,19 +2450,20 @@ if (typeof window !== "undefined") {
             const n = parseInt(els.sliderGppCount.value, 10);
             const smallOwn = parseInt(els.sliderSmallOwn.value, 10) / 100;
             const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
+            const ceilingWeight = parseInt(els.sliderCeilingWeight.value, 10) / 100;
             state.results.small = eng.generateShowdownCorrelated(players, n, {
-              poolAttempts: 4000, seed: 11, ownershipField: "own", salaryCap,
+              poolAttempts: 4000, seed: 11, ownershipField: "own", salaryCap, ceilingWeight,
               ownershipWeight: smallOwn, maxExposureFraction: expFrac,
             }).map(r => ({ arr: r.arr, bringBack: false }));
-            state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, maxExposureFraction: expFrac, showdown: true };
+            state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, maxExposureFraction: expFrac, ceilingWeight, showdown: true };
             setStatus("Generating Large Field GPP lineups...");
             setTimeout(() => {
               const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
               state.results.large = eng.generateShowdownCorrelated(players, n, {
-                poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", salaryCap,
+                poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", salaryCap, ceilingWeight,
                 ownershipWeight: largeOwn, maxExposureFraction: expFrac,
               }).map(r => ({ arr: r.arr, bringBack: false }));
-              state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, maxExposureFraction: expFrac, showdown: true };
+              state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, maxExposureFraction: expFrac, ceilingWeight, showdown: true };
               setStatus("Done.");
               els.generateBtn.disabled = false;
               els.exportBtn.disabled = false;
@@ -2472,21 +2487,22 @@ if (typeof window !== "undefined") {
           const bbShare = parseInt(els.sliderBringback.value, 10) / 100;
           const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
           const stackSize = parseInt(els.sliderStackSize.value, 10);
+          const ceilingWeight = parseInt(els.sliderCeilingWeight.value, 10) / 100;
           state.results.small = eng.generateCorrelatedLineups(players, n, {
-            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap,
+            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, ceilingWeight,
             ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
             stackTeams: [...state.selectedTeams], stackSize, vegasContext: state.vegasContext,
           });
-          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, showdown: false };
+          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, ceilingWeight, showdown: false };
           setStatus("Generating Large Field GPP lineups...");
           setTimeout(() => {
             const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
             state.results.large = eng.generateCorrelatedLineups(players, n, {
-              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap,
+              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, ceilingWeight,
               ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
               stackTeams: [...state.selectedTeams], stackSize, vegasContext: state.vegasContext,
             });
-            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, showdown: false };
+            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, ceilingWeight, showdown: false };
             setStatus("Done.");
             els.generateBtn.disabled = false;
             els.exportBtn.disabled = false;
@@ -2519,25 +2535,32 @@ if (typeof window !== "undefined") {
     return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) : NaN;
   }
 
-  function leverageScorePerPlayer(p, ownField, ownershipWeight) {
+  function leverageScorePerPlayer(p, ownField, ownershipWeight, ceilingWeight = 1.0) {
     const own = p[ownField];
     const ownVal = (own != null && !isNaN(own)) ? own : 0;
-    return p.ceiling * (1 - (ownershipWeight * ownVal) / 100);
+    const blended = ceilingWeight * p.ceiling + (1 - ceilingWeight) * p.proj;
+    return blended * (1 - (ownershipWeight * ownVal) / 100);
   }
 
   function lineupLeverageScore(arr, meta) {
     if (!meta) return NaN;
+    const cw = meta.ceilingWeight != null ? meta.ceilingWeight : 1.0;
     if (meta.showdown) {
-      return arr.reduce((s, p) => s + leverageScorePerPlayer(p, meta.ownershipField, meta.ownershipWeight) * (p.isCaptain ? 1.5 : 1), 0);
+      return arr.reduce((s, p) => s + leverageScorePerPlayer(p, meta.ownershipField, meta.ownershipWeight, cw) * (p.isCaptain ? 1.5 : 1), 0);
     }
-    return arr.reduce((s, p) => s + leverageScorePerPlayer(p, meta.ownershipField, meta.ownershipWeight), 0);
+    return arr.reduce((s, p) => s + leverageScorePerPlayer(p, meta.ownershipField, meta.ownershipWeight, cw), 0);
   }
 
   function renderMetricBanner(meta) {
     if (!meta) return "";
     const pct = Math.round(meta.ownershipWeight * 100);
+    const cw = meta.ceilingWeight != null ? meta.ceilingWeight : 1.0;
+    const cwPct = Math.round(cw * 100);
+    const metricLabel = cwPct === 100
+      ? "Ceiling"
+      : `(${cwPct}% × Ceiling + ${100 - cwPct}% × Projection)`;
     const parts = [
-      `<b>Ranked by:</b> Ceiling × (1 − ${pct}% × ${meta.ownershipFieldLabel} Ownership / 100)`,
+      `<b>Ranked by:</b> ${metricLabel} × (1 − ${pct}% × ${meta.ownershipFieldLabel} Ownership / 100)`,
     ];
     if (!meta.showdown) {
       parts.push(`<b>Stack:</b> QB + ${meta.stackSize}`);
@@ -2602,7 +2625,7 @@ if (typeof window !== "undefined") {
       const rowClass = isStackRow ? "stack-row" : (isBBRow ? "bringback-row" : "");
       const ownVal = p[ownField];
       const levCell = showLev
-        ? `<td class="num">${fmtNum(leverageScorePerPlayer(p, leverageMeta.ownershipField, leverageMeta.ownershipWeight))}</td>`
+        ? `<td class="num">${fmtNum(leverageScorePerPlayer(p, leverageMeta.ownershipField, leverageMeta.ownershipWeight, leverageMeta.ceilingWeight))}</td>`
         : "";
       return `<tr class="${rowClass}">
         <td class="slot">${slot}</td>
@@ -2672,7 +2695,7 @@ if (typeof window !== "undefined") {
       const displaySalary = p.isCaptain ? p.salary * 1.5 : p.salary;
       const rowClass = p.isCaptain ? "stack-row" : "";
       const levCell = showLev
-        ? `<td class="num">${fmtNum(leverageScorePerPlayer(p, leverageMeta.ownershipField, leverageMeta.ownershipWeight) * (p.isCaptain ? 1.5 : 1))}</td>`
+        ? `<td class="num">${fmtNum(leverageScorePerPlayer(p, leverageMeta.ownershipField, leverageMeta.ownershipWeight, leverageMeta.ceilingWeight) * (p.isCaptain ? 1.5 : 1))}</td>`
         : "";
       return `<tr class="${rowClass}">
         <td class="slot">${slot}</td>

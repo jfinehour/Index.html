@@ -2579,12 +2579,13 @@ if (typeof window !== "undefined") {
   }
 
   function renderLineupCard(arr, idx, opts = {}) {
-    const { bringBack, showBadges, ownField = "own", leverageScore = null } = opts;
+    const { bringBack, showBadges, ownField = "own", leverageScore = null, leverageMeta = null } = opts;
     const totals = lineupTotals(arr, ownField);
     const withSlot = slotOrder(arr);
     const qb = arr.find(p => p.position === "QB");
     const qbTeam = qb ? qb.team : null;
     const qbOpp = qb ? eng.oppTeam(qb) : null;
+    const showLev = !!leverageMeta;
 
     let badgesHtml = "";
     if (showBadges) {
@@ -2600,6 +2601,9 @@ if (typeof window !== "undefined") {
       const isBBRow = showBadges && p.position !== "QB" && p.team === qbOpp;
       const rowClass = isStackRow ? "stack-row" : (isBBRow ? "bringback-row" : "");
       const ownVal = p[ownField];
+      const levCell = showLev
+        ? `<td class="num">${fmtNum(leverageScorePerPlayer(p, leverageMeta.ownershipField, leverageMeta.ownershipWeight))}</td>`
+        : "";
       return `<tr class="${rowClass}">
         <td class="slot">${slot}</td>
         <td>${escapeHtml(p.name)}</td>
@@ -2610,6 +2614,7 @@ if (typeof window !== "undefined") {
         <td class="num">${(ownVal != null && !isNaN(ownVal)) ? fmtNum(ownVal) + "%" : "—"}</td>
         <td class="num">${fmtNumOrDash(p.floor)}</td>
         <td class="num">${fmtNum(p.ceiling)}</td>
+        ${levCell}
       </tr>`;
     }).join("");
 
@@ -2622,7 +2627,7 @@ if (typeof window !== "undefined") {
         </span>
       </div>
       <div class="table-scroll"><table class="lineup-table">
-        <thead><tr><th></th><th>Player</th><th>Tm</th><th>Opp</th><th>Sal</th><th>Proj</th><th>Own</th><th>Flr</th><th>Ceil</th></tr></thead>
+        <thead><tr><th></th><th>Player</th><th>Tm</th><th>Opp</th><th>Sal</th><th>Proj</th><th>Own</th><th>Flr</th><th>Ceil</th>${showLev ? "<th>Lev</th>" : ""}</tr></thead>
         <tbody>
           ${rows}
           <tr class="totals-row">
@@ -2632,6 +2637,7 @@ if (typeof window !== "undefined") {
             <td class="num">${fmtNum(totals.own)}%</td>
             <td class="num">${fmtNumOrDash(totals.floor)}</td>
             <td class="num">${fmtNum(totals.ceiling)}</td>
+            ${showLev ? `<td class="num">${fmtNum(leverageScore)}</td>` : ""}
           </tr>
         </tbody>
       </table></div>
@@ -2656,14 +2662,18 @@ if (typeof window !== "undefined") {
   }
 
   function renderShowdownLineupCard(arr, idx, opts = {}) {
-    const { ownField = "own", leverageScore = null } = opts;
+    const { ownField = "own", leverageScore = null, leverageMeta = null } = opts;
     const totals = showdownLineupTotals(arr, ownField);
     const withSlot = showdownSlotOrder(arr);
+    const showLev = !!leverageMeta;
 
     const rows = withSlot.map(({ p, slot }) => {
       const ownVal = p[ownField];
       const displaySalary = p.isCaptain ? p.salary * 1.5 : p.salary;
       const rowClass = p.isCaptain ? "stack-row" : "";
+      const levCell = showLev
+        ? `<td class="num">${fmtNum(leverageScorePerPlayer(p, leverageMeta.ownershipField, leverageMeta.ownershipWeight) * (p.isCaptain ? 1.5 : 1))}</td>`
+        : "";
       return `<tr class="${rowClass}">
         <td class="slot">${slot}</td>
         <td>${escapeHtml(p.name)}${p.isCaptain ? ' <span class="badge stack" style="margin-left:4px;">1.5x</span>' : ""}</td>
@@ -2674,6 +2684,7 @@ if (typeof window !== "undefined") {
         <td class="num">${(ownVal != null && !isNaN(ownVal)) ? fmtNum(ownVal) + "%" : "—"}</td>
         <td class="num">${fmtNumOrDash(p.floor)}</td>
         <td class="num">${fmtNum(p.ceiling)}</td>
+        ${levCell}
       </tr>`;
     }).join("");
 
@@ -2683,7 +2694,7 @@ if (typeof window !== "undefined") {
         ${leverageScore != null ? `<span class="lineup-leverage">Leverage: <b>${fmtNum(leverageScore)}</b></span>` : ""}
       </div>
       <div class="table-scroll"><table class="lineup-table">
-        <thead><tr><th></th><th>Player</th><th>Tm</th><th>Opp</th><th>Sal</th><th>Proj</th><th>Own</th><th>Flr</th><th>Ceil</th></tr></thead>
+        <thead><tr><th></th><th>Player</th><th>Tm</th><th>Opp</th><th>Sal</th><th>Proj</th><th>Own</th><th>Flr</th><th>Ceil</th>${showLev ? "<th>Lev</th>" : ""}</tr></thead>
         <tbody>
           ${rows}
           <tr class="totals-row">
@@ -2693,6 +2704,7 @@ if (typeof window !== "undefined") {
             <td class="num">${fmtNum(totals.own)}%</td>
             <td class="num">${fmtNumOrDash(totals.floor)}</td>
             <td class="num">${fmtNum(totals.ceiling)}</td>
+            ${showLev ? `<td class="num">${fmtNum(leverageScore)}</td>` : ""}
           </tr>
         </tbody>
       </table></div>
@@ -2762,8 +2774,8 @@ if (typeof window !== "undefined") {
       else {
         const meta = state.resultsMeta.small;
         const cards = isShowdown
-          ? state.results.small.map((r, i) => renderShowdownLineupCard(r.arr, i, { ownField: "own", leverageScore: lineupLeverageScore(r.arr, meta) })).join("")
-          : state.results.small.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true, ownField: "own", leverageScore: lineupLeverageScore(r.arr, meta) })).join("");
+          ? state.results.small.map((r, i) => renderShowdownLineupCard(r.arr, i, { ownField: "own", leverageScore: lineupLeverageScore(r.arr, meta), leverageMeta: meta })).join("")
+          : state.results.small.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true, ownField: "own", leverageScore: lineupLeverageScore(r.arr, meta), leverageMeta: meta })).join("");
         html = renderMetricBanner(meta) + cards;
       }
     } else if (activeTab === "large") {
@@ -2771,8 +2783,8 @@ if (typeof window !== "undefined") {
       else {
         const meta = state.resultsMeta.large;
         const cards = isShowdown
-          ? state.results.large.map((r, i) => renderShowdownLineupCard(r.arr, i, { ownField: "ownLarge", leverageScore: lineupLeverageScore(r.arr, meta) })).join("")
-          : state.results.large.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true, ownField: "ownLarge", leverageScore: lineupLeverageScore(r.arr, meta) })).join("");
+          ? state.results.large.map((r, i) => renderShowdownLineupCard(r.arr, i, { ownField: "ownLarge", leverageScore: lineupLeverageScore(r.arr, meta), leverageMeta: meta })).join("")
+          : state.results.large.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true, ownField: "ownLarge", leverageScore: lineupLeverageScore(r.arr, meta), leverageMeta: meta })).join("");
         html = renderMetricBanner(meta) + cards;
       }
     } else if (activeTab === "exposure") {

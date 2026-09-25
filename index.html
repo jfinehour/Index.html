@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
 <title>Gridlock — DFS Lineup Builder</title>
 <style>
+
 /* ============================================================
    GRIDLOCK — DFS Lineup Builder
    Design: Buffalo Bills colorway — deep navy field, royal blue
@@ -612,9 +613,11 @@ table.exposure-table td.num { text-align: right; }
   .lineup-grid .lineup-card { margin-bottom: 0; }
 }
 
+
 </style>
 </head>
 <body>
+
 <div class="app">
 
   <header class="hero">
@@ -724,7 +727,19 @@ table.exposure-table td.num { text-align: right; }
       <div class="slider-group" id="stackSizeGroup">
         <div class="slider-label"><b>Stack size</b><span class="val" id="valStackSize">QB + 1</span></div>
         <input type="range" id="sliderStackSize" min="1" max="3" value="1" step="1">
-        <div class="slider-note">Number of same-team teammates rostered alongside the QB. Push to 2 or 3 to target games you expect to blow past the Vegas total.</div>
+        <div class="slider-note">Number of same-team teammates rostered alongside the QB (RB/WR/TE only — never the defense). Push to 2 or 3 to target games you expect to blow past the Vegas total.</div>
+      </div>
+
+      <div class="slider-group" id="secondaryStackGroup">
+        <div class="slider-label"><b>Secondary game stack</b><span class="val" id="valSecondaryStack">Off</span></div>
+        <input type="range" id="sliderSecondaryStack" min="0" max="3" value="0" step="1">
+        <div class="slider-note">Also lock in this many same-team RB/WR/TE from a second, unrelated game — spreads correlation across multiple games instead of one.</div>
+      </div>
+
+      <div class="slider-group" id="tertiaryStackGroup">
+        <div class="slider-label"><b>Tertiary game stack</b><span class="val" id="valTertiaryStack">Off</span></div>
+        <input type="range" id="sliderTertiaryStack" min="0" max="3" value="0" step="1">
+        <div class="slider-note">A third correlated game stack. Requires Secondary to be on first.</div>
       </div>
 
       <div class="slider-group toggle-group" id="vegasGroup">
@@ -806,7 +821,9 @@ table.exposure-table td.num { text-align: right; }
   <button class="btn btn-primary" id="generateBtn" disabled>Generate Lineups</button>
 </div>
 
+
 <script>
+
 /* =====================================================================
    DFS Lineup Optimization Engine (pure JS, no dependencies)
    Works in-browser (window.DFSEngine) or in Node (module.exports) for testing.
@@ -1078,7 +1095,8 @@ function buildOneLineup(pool, opts) {
   const { scoreFn, rng, noise = 0.15, requireStack = false, requireBringBack = false,
           exposure = new Map(), maxExposure = null, topK = 5,
           flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1,
-          vegasContext = null, salaryCap = SALARY_CAP } = opts;
+          vegasContext = null, salaryCap = SALARY_CAP,
+          secondaryStackSize = 0, tertiaryStackSize = 0 } = opts;
 
   const byPos = { QB: [], RB: [], WR: [], TE: [], DST: [] };
   for (const p of pool) if (byPos[p.position]) byPos[p.position].push(p);
@@ -1209,6 +1227,51 @@ function buildOneLineup(pool, opts) {
     }
   }
 
+  // 3.5 Secondary/tertiary GAME stacks: 2+ RB/WR/TE from the SAME team in a
+  // DIFFERENT game than the QB's, to spread correlation across multiple
+  // games instead of concentrating it all in one. Each additional stack
+  // picks its own team (excluding games already used) and locks that many
+  // teammates from it.
+  function buildTeamMiniStack(size, excludeTeams) {
+    let chosenTeam = null;
+    let placedCount = 0;
+    for (let s = 0; s < size; s++) {
+      const filledSoFar = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: flexUsed ? 1 : 0 };
+      const candidates = [...byPos.RB, ...byPos.WR, ...byPos.TE].filter(
+        p => !used.has(p.id) && !excludeTeams.has(p.team) &&
+             (chosenTeam === null || p.team === chosenTeam) &&
+             p.salary <= salaryLeft - remainingSlotsAfter(filledSoFar) * 3000
+      );
+      if (candidates.length === 0) break;
+      candidates.sort((a, b) => weight(b) - weight(a));
+      const pick = pickWeighted(candidates, rng, topK);
+      if (chosenTeam === null) chosenTeam = pick.team;
+      if (place(pick)) placedCount++;
+      else break;
+    }
+    return { placedCount, team: chosenTeam };
+  }
+
+  let secondaryStackSatisfied = secondaryStackSize <= 0;
+  let tertiaryStackSatisfied = tertiaryStackSize <= 0;
+
+  if (secondaryStackSize > 0) {
+    const excludeTeams = new Set([qbTeam, qbOppTeam]);
+    const res = buildTeamMiniStack(secondaryStackSize, excludeTeams);
+    secondaryStackSatisfied = res.placedCount >= secondaryStackSize;
+
+    if (tertiaryStackSize > 0) {
+      const excludeTeams2 = new Set([qbTeam, qbOppTeam]);
+      if (res.team) {
+        excludeTeams2.add(res.team);
+        const secPlayer = pool.find(p => p.team === res.team);
+        if (secPlayer && secPlayer.opp) excludeTeams2.add(secPlayer.opp);
+      }
+      const res2 = buildTeamMiniStack(tertiaryStackSize, excludeTeams2);
+      tertiaryStackSatisfied = res2.placedCount >= tertiaryStackSize;
+    }
+  }
+
   // 4. Fill remaining fixed slots: RB, WR, TE, DST
   for (const pos of ["RB", "WR", "TE", "DST"]) {
     const need = ROSTER_SLOTS[pos] - slots[pos].length;
@@ -1235,6 +1298,8 @@ function buildOneLineup(pool, opts) {
 
   if (requireStack && !stackSatisfied) return null;
   if (requireBringBack && !bringBackSatisfied) return null;
+  if (secondaryStackSize > 0 && !secondaryStackSatisfied) return null;
+  if (tertiaryStackSize > 0 && !tertiaryStackSatisfied) return null;
 
   const arr = lineupArray(slots);
   if (arr.length !== 9) return null;
@@ -1247,7 +1312,7 @@ function buildOneLineup(pool, opts) {
 function improveLineup(lineup, pool, scoreFn, opts = {}) {
   const { requireStack = false, requireBringBack = false, iterations = 60,
           flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1,
-          salaryCap = SALARY_CAP } = opts;
+          salaryCap = SALARY_CAP, secondaryStackSize = 0, tertiaryStackSize = 0 } = opts;
   let { slots, arr } = lineup;
   const usedIds = new Set(arr.map(p => p.id));
 
@@ -1255,12 +1320,32 @@ function improveLineup(lineup, pool, scoreFn, opts = {}) {
   function qbOppOf(arrX) { const qb = arrX.find(p => p.position === "QB"); return qb ? oppTeam(qb) : null; }
   function hasStackArr(arrX) {
     const t = qbTeamOf(arrX);
-    const count = arrX.filter(p => p.position !== "QB" && p.team === t).length;
+    const count = arrX.filter(p => p.position !== "QB" && p.position !== "DST" && p.team === t).length;
     return count >= stackSize;
   }
   function hasBringBackArr(arrX) {
     const o = qbOppOf(arrX);
     return arrX.some(p => p.position !== "QB" && p.position !== "DST" && p.team === o);
+  }
+  // Approximate check: are there enough distinct non-QB-game teams with
+  // enough players to satisfy the requested secondary/tertiary stack sizes?
+  // Greedy largest-requirement-to-largest-available matching — cheap and
+  // correct for the realistic case of at most 2 extra requirements.
+  function hasAdditionalStacksArr(arrX) {
+    if (secondaryStackSize <= 0 && tertiaryStackSize <= 0) return true;
+    const qbT = qbTeamOf(arrX), qbO = qbOppOf(arrX);
+    const counts = {};
+    for (const p of arrX) {
+      if (p.position === "QB" || p.position === "DST") continue;
+      if (p.team === qbT || p.team === qbO) continue;
+      counts[p.team] = (counts[p.team] || 0) + 1;
+    }
+    const available = Object.values(counts).sort((a, b) => b - a);
+    const needed = [secondaryStackSize, tertiaryStackSize].filter(n => n > 0).sort((a, b) => b - a);
+    for (let i = 0; i < needed.length; i++) {
+      if (!(available[i] >= needed[i])) return false;
+    }
+    return true;
   }
 
   const slotKeyOf = (p, slots) => {
@@ -1292,7 +1377,8 @@ function improveLineup(lineup, pool, scoreFn, opts = {}) {
         const newArr = lineupArray(slots);
         const newStackOk = !requireStack || hasStackArr(newArr);
         const newBBOk = !requireBringBack || hasBringBackArr(newArr);
-        if (lineupSalary(newArr) <= salaryCap && newStackOk && newBBOk) {
+        const newAdditionalOk = hasAdditionalStacksArr(newArr);
+        if (lineupSalary(newArr) <= salaryCap && newStackOk && newBBOk && newAdditionalOk) {
           usedIds.delete(p.id); usedIds.add(best.id);
           arr = newArr;
           improved = true;
@@ -1590,7 +1676,8 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, bringBackShare = 0.5,
           maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
           flexEligible = FLEX_ELIGIBLE, stackTeams = null, stackSize = 1,
-          vegasContext = null, salaryCap = SALARY_CAP, ceilingWeight = 1.0 } = opts;
+          vegasContext = null, salaryCap = SALARY_CAP, ceilingWeight = 1.0,
+          secondaryStackSize = 0, tertiaryStackSize = 0 } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
   const qbTeamFilter = (stackTeams && stackTeams.length > 0) ? new Set(stackTeams) : null;
@@ -1609,11 +1696,12 @@ function generateCorrelatedLineups(players, n, opts = {}) {
     const wantBringBack = rng() < bringBackShare;
     const built = buildOneLineup(players, {
       scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize, vegasContext, salaryCap,
-      requireStack: true, requireBringBack: wantBringBack,
+      requireStack: true, requireBringBack: wantBringBack, secondaryStackSize, tertiaryStackSize,
     });
     if (!built) continue;
     const improved = improveLineup(built, players, leverageScore, {
       requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize, salaryCap,
+      secondaryStackSize, tertiaryStackSize,
     });
     const sig = signature(improved.arr);
     if (seenSigs.has(sig)) continue;
@@ -1939,8 +2027,10 @@ if (typeof window !== "undefined") {
   window.DFSEngine = DFSEngine;
 }
 
+
 </script>
 <script>
+
 (function () {
   "use strict";
   const eng = window.DFSEngine;
@@ -1976,6 +2066,8 @@ if (typeof window !== "undefined") {
     sliderLargeOwn: document.getElementById("sliderLargeOwn"),
     sliderBringback: document.getElementById("sliderBringback"),
     sliderStackSize: document.getElementById("sliderStackSize"),
+    sliderSecondaryStack: document.getElementById("sliderSecondaryStack"),
+    sliderTertiaryStack: document.getElementById("sliderTertiaryStack"),
     sliderExposure: document.getElementById("sliderExposure"),
     sliderGppCount: document.getElementById("sliderGppCount"),
     toggleTEFlex: document.getElementById("toggleTEFlex"),
@@ -1988,6 +2080,8 @@ if (typeof window !== "undefined") {
     valLargeOwn: document.getElementById("valLargeOwn"),
     valBringback: document.getElementById("valBringback"),
     valStackSize: document.getElementById("valStackSize"),
+    valSecondaryStack: document.getElementById("valSecondaryStack"),
+    valTertiaryStack: document.getElementById("valTertiaryStack"),
     valExposure: document.getElementById("valExposure"),
     valGppCount: document.getElementById("valGppCount"),
     tabCountSmall: document.getElementById("tabCountSmall"),
@@ -2012,6 +2106,8 @@ if (typeof window !== "undefined") {
     contestShowdown: document.getElementById("contestShowdown"),
     showdownFDNote: document.getElementById("showdownFDNote"),
     stackSizeGroup: document.getElementById("stackSizeGroup"),
+    secondaryStackGroup: document.getElementById("secondaryStackGroup"),
+    tertiaryStackGroup: document.getElementById("tertiaryStackGroup"),
     bringbackGroup: document.getElementById("bringbackGroup"),
     teFlexGroup: document.getElementById("teFlexGroup"),
     vegasGroup: document.getElementById("vegasGroup"),
@@ -2055,6 +2151,8 @@ if (typeof window !== "undefined") {
     // positions, so QB-based stacking/bring-back/flex-TE concepts don't map).
     const showClassicOnly = c === "classic" ? "block" : "none";
     els.stackSizeGroup.style.display = showClassicOnly;
+    els.secondaryStackGroup.style.display = showClassicOnly;
+    els.tertiaryStackGroup.style.display = showClassicOnly;
     els.bringbackGroup.style.display = showClassicOnly;
     els.teFlexGroup.style.display = showClassicOnly;
     els.vegasGroup.style.display = showClassicOnly;
@@ -2091,6 +2189,24 @@ if (typeof window !== "undefined") {
   els.sliderStackSize.addEventListener("input", () => {
     els.valStackSize.textContent = "QB + " + els.sliderStackSize.value;
   });
+  function updateSecondaryTertiaryLabels() {
+    const sec = parseInt(els.sliderSecondaryStack.value, 10);
+    const ter = parseInt(els.sliderTertiaryStack.value, 10);
+    els.valSecondaryStack.textContent = sec === 0 ? "Off" : `${sec} players`;
+    els.valTertiaryStack.textContent = ter === 0 ? "Off" : `${ter} players`;
+    // Tertiary only makes sense once secondary is on — clamp it off otherwise,
+    // and grey out the control so it's clear why.
+    const tertiaryAllowed = sec > 0;
+    els.sliderTertiaryStack.disabled = !tertiaryAllowed;
+    els.tertiaryStackGroup.style.opacity = tertiaryAllowed ? "1" : "0.45";
+    if (!tertiaryAllowed && ter > 0) {
+      els.sliderTertiaryStack.value = 0;
+      els.valTertiaryStack.textContent = "Off";
+    }
+  }
+  els.sliderSecondaryStack.addEventListener("input", updateSecondaryTertiaryLabels);
+  els.sliderTertiaryStack.addEventListener("input", updateSecondaryTertiaryLabels);
+  updateSecondaryTertiaryLabels();
   bindSlider(els.sliderExposure, els.valExposure, "%");
   els.sliderGppCount.addEventListener("input", () => {
     els.valGppCount.textContent = els.sliderGppCount.value;
@@ -2487,22 +2603,24 @@ if (typeof window !== "undefined") {
           const bbShare = parseInt(els.sliderBringback.value, 10) / 100;
           const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
           const stackSize = parseInt(els.sliderStackSize.value, 10);
+          const secondaryStackSize = parseInt(els.sliderSecondaryStack.value, 10);
+          const tertiaryStackSize = parseInt(els.sliderTertiaryStack.value, 10);
           const ceilingWeight = parseInt(els.sliderCeilingWeight.value, 10) / 100;
           state.results.small = eng.generateCorrelatedLineups(players, n, {
             poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, ceilingWeight,
             ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
-            stackTeams: [...state.selectedTeams], stackSize, vegasContext: state.vegasContext,
+            stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
           });
-          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, ceilingWeight, showdown: false };
+          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, showdown: false };
           setStatus("Generating Large Field GPP lineups...");
           setTimeout(() => {
             const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
             state.results.large = eng.generateCorrelatedLineups(players, n, {
               poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, ceilingWeight,
               ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
-              stackTeams: [...state.selectedTeams], stackSize, vegasContext: state.vegasContext,
+              stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
             });
-            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, ceilingWeight, showdown: false };
+            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, showdown: false };
             setStatus("Done.");
             els.generateBtn.disabled = false;
             els.exportBtn.disabled = false;
@@ -2564,6 +2682,8 @@ if (typeof window !== "undefined") {
     ];
     if (!meta.showdown) {
       parts.push(`<b>Stack:</b> QB + ${meta.stackSize}`);
+      if (meta.secondaryStackSize > 0) parts.push(`<b>2nd game stack:</b> ${meta.secondaryStackSize} players`);
+      if (meta.tertiaryStackSize > 0) parts.push(`<b>3rd game stack:</b> ${meta.tertiaryStackSize} players`);
       parts.push(`<b>Bring-back rate:</b> ${Math.round(meta.bringBackShare * 100)}%`);
     } else {
       parts.push(`<b>Captain:</b> ×1.5 score &amp; salary`);
@@ -2612,11 +2732,25 @@ if (typeof window !== "undefined") {
 
     let badgesHtml = "";
     if (showBadges) {
-      const stackCount = arr.filter(p => p.position !== "QB" && p.team === qbTeam).length;
-      const hasBB = arr.some(p => p.position !== "QB" && p.team === qbOpp);
+      const stackCount = arr.filter(p => p.position !== "QB" && p.position !== "DST" && p.team === qbTeam).length;
+      const hasBB = arr.some(p => p.position !== "QB" && p.position !== "DST" && p.team === qbOpp);
       if (stackCount >= 2) badgesHtml += `<span class="badge stack">${stackCount + 1}-STACK</span>`;
       else if (stackCount === 1) badgesHtml += `<span class="badge stack">STACK</span>`;
       if (hasBB) badgesHtml += `<span class="badge bringback">BRING-BACK</span>`;
+
+      // Additional game stacks: any other team (not QB's team/opp) with 2+
+      // non-QB, non-DST players, sorted by size — labeled 2nd/3rd game stack.
+      const otherCounts = {};
+      arr.forEach(p => {
+        if (p.position === "QB" || p.position === "DST") return;
+        if (p.team === qbTeam || p.team === qbOpp) return;
+        otherCounts[p.team] = (otherCounts[p.team] || 0) + 1;
+      });
+      const otherStacks = Object.entries(otherCounts).filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]);
+      otherStacks.forEach(([team, count], idx) => {
+        const label = idx === 0 ? "2ND GAME" : "3RD GAME";
+        badgesHtml += `<span class="badge bringback">${label}: ${team} ×${count}</span>`;
+      });
     }
 
     const rows = withSlot.map(({ p, slot }) => {
@@ -2924,6 +3058,7 @@ if (typeof window !== "undefined") {
 
   render();
 })();
+
 
 </script>
 </body>

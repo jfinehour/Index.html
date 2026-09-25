@@ -597,6 +597,13 @@ table.sim-table th {
   padding: 8px 6px; border-bottom: 1px solid var(--line);
   position: sticky; top: 0; background: var(--bg);
 }
+table.sim-table th.sortable-th {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+table.sim-table th.sortable-th:active { color: var(--text); }
+table.sim-table th.sortable-th.active { color: var(--amber); }
 table.sim-table td { padding: 8px 6px; border-bottom: 1px solid var(--line-soft); font-variant-numeric: tabular-nums; }
 table.sim-table td.num { text-align: right; }
 table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; white-space: nowrap; }
@@ -2350,6 +2357,7 @@ if (typeof window !== "undefined") {
     results: { proj: null, ceil: null, small: null, large: null },
     resultsMeta: { small: null, large: null },
     simResults: null,
+    simSort: { key: "median", dir: "desc" },
     selectedTeams: new Set(),
     vegasContext: null,
   };
@@ -3344,8 +3352,15 @@ if (typeof window !== "undefined") {
 
     let tableHtml = "";
     if (state.simResults) {
+      const sortKey = state.simSort.key;
+      const sortDir = state.simSort.dir;
+      const statVal = (r) => sortKey === "spread" ? (r.stats.p90 - r.stats.p10) : r.stats[sortKey];
+      const sorted = state.simResults.slice().sort((a, b) =>
+        sortDir === "desc" ? statVal(b) - statVal(a) : statVal(a) - statVal(b)
+      );
+
       const globalMax = Math.max(...state.simResults.map(r => r.stats.p90));
-      const rows = state.simResults.map(r => {
+      const rows = sorted.map(r => {
         const s = r.stats;
         const leftPct = (s.p10 / globalMax) * 100;
         const widthPct = ((s.p90 - s.p10) / globalMax) * 100;
@@ -3365,8 +3380,22 @@ if (typeof window !== "undefined") {
           </td>
         </tr>`;
       }).join("");
+
+      function th(label, key) {
+        const active = sortKey === key;
+        const arrow = active ? (sortDir === "desc" ? " ▼" : " ▲") : "";
+        return `<th class="sortable-th${active ? " active" : ""}" data-sort-key="${key}">${label}${arrow}</th>`;
+      }
       tableHtml = `<div style="overflow-x:auto"><table class="sim-table">
-        <thead><tr><th>Lineup</th><th>Median</th><th>Mean</th><th>Std</th><th>P10</th><th>P90</th><th>Range (P10–P90)</th></tr></thead>
+        <thead><tr>
+          <th>Lineup</th>
+          ${th("Median", "median")}
+          ${th("Mean", "mean")}
+          ${th("Std", "std")}
+          ${th("P10", "p10")}
+          ${th("P90", "p90")}
+          ${th("Range (P10–P90)", "spread")}
+        </tr></thead>
         <tbody>${rows}</tbody>
       </table></div>`;
     } else {
@@ -3385,6 +3414,19 @@ if (typeof window !== "undefined") {
 
     slider.addEventListener("input", () => { val.textContent = slider.value; });
 
+    document.querySelectorAll(".sortable-th").forEach(th => {
+      th.addEventListener("click", () => {
+        const key = th.dataset.sortKey;
+        if (state.simSort.key === key) {
+          state.simSort.dir = state.simSort.dir === "desc" ? "asc" : "desc";
+        } else {
+          state.simSort.key = key;
+          state.simSort.dir = "desc";
+        }
+        render();
+      });
+    });
+
     btn.addEventListener("click", () => {
       const entries = collectAllLineupsForSim();
       if (entries.length === 0) return;
@@ -3396,8 +3438,7 @@ if (typeof window !== "undefined") {
       setTimeout(() => {
         const arrs = entries.map(e => e.arr);
         const statsArr = eng.simulateLineups(arrs, { iterations, seed: 1, vegasContext: state.vegasContext });
-        state.simResults = entries.map((e, i) => ({ bucket: e.bucket, rank: e.rank, stats: statsArr[i] }))
-          .sort((a, b) => b.stats.median - a.stats.median);
+        state.simResults = entries.map((e, i) => ({ bucket: e.bucket, rank: e.rank, stats: statsArr[i] }));
         btn.disabled = false;
         btn.textContent = "Run Simulation";
         status.textContent = "Done.";

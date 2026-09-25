@@ -2318,12 +2318,356 @@ function simulateLineups(lineups, opts = {}) {
   });
 }
 
+/* =====================================================================
+   Contest ROI simulation.
+
+   Builds a synthetic opponent field by sampling players probabilistically
+   according to ownership (Large Field ownership by default, since that's
+   what a big-field GPP's real opponents look like), constructs valid
+   rosters from that sample, then runs the SAME correlated Monte Carlo
+   machinery as simulateLineups across your lineup and the whole field
+   together per iteration — so a real slate outcome plays out for
+   everyone at once, not independently.
+
+   Approximation used for performance: rather than generating one lineup
+   per real entrant (computationally infeasible for a 17,000+ entry
+   field), a smaller sample of distinct "archetype" lineups is generated
+   and each is weighted to represent (totalEntries / sampleSize) real
+   opponents. This is the standard approach used by DFS profitability
+   tools — it gets the shape of the field right (how differentiated your
+   lineup is from the crowd) without needing to construct tens of
+   thousands of individual rosters.
+
+   Known limitations, stated plainly:
+   - Field sampling treats ownership as roughly independent per player;
+     real opponents also stack and correlate picks the way you do, which
+     this doesn't fully capture.
+   - Archetypes aren't required to stack, unlike your own GPP lineups.
+   - This does not model multi-entry strategies (submitting several
+     lineups into the same contest) — each lineup evaluated here is
+     treated as an independent single entry.
+   ===================================================================== */
+
+/** True proportional (roulette-wheel) weighted random pick — unlike
+ * pickWeighted (which samples uniformly among the top-K candidates, by
+ * design, for lineup diversity), this makes a 50%-owned player roughly
+ * 50x more likely to be chosen than a 1%-owned one. That's what field
+ * generation actually needs: real ownership proportions, not just "a
+ * reasonable pick." */
+function weightedRandomPick(candidates, weightFn, rng) {
+  const weights = candidates.map(weightFn);
+  const total = weights.reduce((a, b) => a + b, 0);
+  if (total <= 0) return candidates[Math.floor(rng() * candidates.length)];
+  let r = rng() * total;
+  for (let i = 0; i < candidates.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return candidates[i];
+  }
+  return candidates[candidates.length - 1];
+}
+
+function ownershipWeightOf(p, ownershipField) {
+  const o = p[ownershipField];
+  // small floor so a 0%-owned player is rare, not literally impossible —
+  // real fields do occasionally include an unpopular dart-throw.
+  return (o != null && !isNaN(o)) ? Math.max(0.05, o) : 0.3;
+}
+
+/** Builds one classic-roster synthetic field entrant via true
+ * ownership-proportional sampling at every slot (no stack requirement —
+ * generic field entrants aren't assumed to stack). */
+function buildFieldArchetype(pool, opts) {
+  const { rng, ownershipField = "ownLarge", salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE } = opts;
+  const byPos = { QB: [], RB: [], WR: [], TE: [], DST: [] };
+  for (const p of pool) if (byPos[p.position]) byPos[p.position].push(p);
+
+  const used = new Set();
+  const slots = emptySlots();
+  let salaryLeft = salaryCap;
+  let flexUsed = false;
+
+  function place(p) {
+    const slotKey = p.position;
+    if (slots[slotKey] && slots[slotKey].length < ROSTER_SLOTS[slotKey]) {
+      slots[slotKey].push(p); used.add(p.id); salaryLeft -= p.salary;
+      return true;
+    }
+    if (flexEligible.has(slotKey) && !flexUsed) {
+      slots.FLEX.push(p); used.add(p.id); salaryLeft -= p.salary;
+      flexUsed = true;
+      return true;
+    }
+    return false;
+  }
+
+  const order = [
+    ["QB", 1], ["RB", 2], ["WR", 3], ["TE", 1], ["DST", 1],
+  ];
+  for (const [pos, count] of order) {
+    for (let i = slots[pos].length; i < count; i++) {
+      const filledCounts = { QB: slots.QB.length, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: flexUsed ? 1 : 0 };
+      const remaining = remainingSlotsAfter(filledCounts) - 1;
+      const minFutureSalary = remaining * 3000;
+      const candidates = byPos[pos].filter(p => !used.has(p.id) && p.salary <= salaryLeft - minFutureSalary);
+      if (candidates.length === 0) return null;
+      const pick = weightedRandomPick(candidates, p => ownershipWeightOf(p, ownershipField), rng);
+      if (!place(pick)) return null;
+    }
+  }
+  if (!flexUsed) {
+    const filledCounts = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: 0 };
+    const remaining = remainingSlotsAfter(filledCounts) - 1;
+    const minFutureSalary = remaining * 3000;
+    const flexPool = pool.filter(p => flexEligible.has(p.position) && !used.has(p.id) && p.salary <= salaryLeft - minFutureSalary);
+    if (flexPool.length === 0) return null;
+    const pick = weightedRandomPick(flexPool, p => ownershipWeightOf(p, ownershipField), rng);
+    if (!place(pick)) return null;
+  }
+
+  const arr = lineupArray(slots);
+  if (arr.length !== 9 || lineupSalary(arr) > salaryCap) return null;
+  return arr;
+}
+
+/** Showdown equivalent: 1 CPT + 5 FLEX, ownership-proportional at every
+ * pick, with the same both-teams-represented requirement as real
+ * lineups (approximated here — not every real entrant may satisfy it,
+ * but this keeps field archetypes at least contest-legal). */
+function buildShowdownFieldArchetype(pool, opts) {
+  const { rng, ownershipField = "ownLarge", salaryCap = 50000 } = opts;
+  const teams = [...new Set(pool.map(p => p.team))];
+  const used = new Set();
+  let salaryLeft = salaryCap;
+
+  const cptCandidates = pool.filter(p => p.salary * 1.5 <= salaryLeft - 5 * 2000);
+  if (cptCandidates.length === 0) return null;
+  const cpt = weightedRandomPick(cptCandidates, p => ownershipWeightOf(p, ownershipField), rng);
+  used.add(cpt.id);
+  salaryLeft -= cpt.salary * 1.5;
+
+  const flex = [];
+  for (let i = 0; i < 5; i++) {
+    const remaining = 5 - i;
+    const minFloor = (remaining - 1) * 2000;
+    let candidates = pool.filter(p => !used.has(p.id) && p.salary <= salaryLeft - minFloor);
+    if (remaining === 1 && teams.length >= 2) {
+      const teamsSoFar = new Set([cpt.team, ...flex.map(p => p.team)]);
+      if (teamsSoFar.size < 2) {
+        const missing = teams.find(t => !teamsSoFar.has(t));
+        candidates = candidates.filter(p => p.team === missing);
+      }
+    }
+    if (candidates.length === 0) return null;
+    const pick = weightedRandomPick(candidates, p => ownershipWeightOf(p, ownershipField), rng);
+    used.add(pick.id);
+    salaryLeft -= pick.salary;
+    flex.push(pick);
+  }
+
+  const arr = [{ ...cpt, isCaptain: true }, ...flex.map(p => ({ ...p, isCaptain: false }))];
+  if (arr.reduce((s, p) => s + (p.isCaptain ? p.salary * 1.5 : p.salary), 0) > salaryCap) return null;
+  if (teams.length >= 2 && new Set(arr.map(p => p.team)).size < 2) return null;
+  return arr;
+}
+
+/**
+ * Parses a pasted prize-payout table. Handles both single positions
+ * ("1st") and ranges ("7th - 8th"), each followed by a dollar amount
+ * anywhere on the line. Returns a sorted array of {start, end, payout}.
+ */
+function parsePayoutTable(text) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l);
+  const rows = [];
+  const ordinalRe = /(\d+)(?:st|nd|rd|th)/g;
+  for (const line of lines) {
+    const dollarMatch = line.match(/\$[\d,]+\.?\d*/);
+    if (!dollarMatch) continue;
+    const payout = parseFloat(dollarMatch[0].replace(/[$,]/g, ""));
+    if (isNaN(payout)) continue;
+    const positions = [];
+    let m;
+    ordinalRe.lastIndex = 0;
+    while ((m = ordinalRe.exec(line)) !== null) positions.push(parseInt(m[1], 10));
+    if (positions.length === 0) continue;
+    rows.push({ start: Math.min(...positions), end: Math.max(...positions), payout });
+  }
+  if (rows.length === 0) {
+    throw new Error("Could not find any position/payout rows. Expected lines like \"1st  $15,000.00\" or \"7th - 8th  $2,000.00\".");
+  }
+  rows.sort((a, b) => a.start - b.start);
+  return rows;
+}
+
+/** Best-effort extraction of total entries from a pasted contest summary
+ * (e.g. "This 17156-player contest features..."). Returns null if not found —
+ * callers should fall back to an explicit numeric input. */
+function parseContestEntryCount(text) {
+  const m = text.match(/([\d,]+)\s*-?\s*(?:player|entry|entries|team)/i);
+  if (!m) return null;
+  const n = parseInt(m[1].replace(/,/g, ""), 10);
+  return isNaN(n) ? null : n;
+}
+
+function payoutForRank(rank, payoutTable) {
+  for (const row of payoutTable) {
+    if (rank >= row.start && rank <= row.end) return row.payout;
+  }
+  return 0;
+}
+
+/**
+ * Runs a full contest simulation for ONE lineup (entered as a single,
+ * independent entry) against a synthetic field sampled by ownership.
+ * Returns { avgPayout, roiPct, cashRatePct, medianRank, bestRank,
+ *           worstRank, fieldSampleSize, iterations }.
+ */
+function simulateContestROI(userLineup, players, opts) {
+  const {
+    totalEntries, payoutTable, entryFee,
+    fieldSampleSize = 400, iterations = 300, seed = 1,
+    ownershipField = "ownLarge", vegasContext = null,
+    teamWeight = 0.35, gameWeightBase = 0.15,
+    isShowdown = false, salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE,
+  } = opts;
+
+  if (!payoutTable || payoutTable.length === 0) throw new Error("No payout table provided.");
+  if (!totalEntries || totalEntries < 2) throw new Error("Total entries must be at least 2.");
+
+  // Step 1: build a synthetic field via TRUE ownership-proportional
+  // sampling (see buildFieldArchetype). Rather than collecting N distinct
+  // archetypes and weighting them uniformly, we draw a larger number of
+  // raw samples and track how often each exact lineup recurs — real
+  // fields genuinely do converge heavily on the same chalk combinations,
+  // and that recurrence rate IS the field's real shape, not noise to be
+  // discarded. A lineup 15% of raw draws land on gets ~15% of the
+  // field's weight, not an equal share alongside one-off longshots.
+  const rngField = mulberry32((seed * 7919 + 13) >>> 0);
+  const rawDrawTarget = Math.max(1500, fieldSampleSize * 4);
+  const archetypeCounts = new Map(); // signature -> { arr, count }
+  const maxAttempts = rawDrawTarget * 3;
+  let attempts = 0, draws = 0;
+  while (draws < rawDrawTarget && attempts < maxAttempts) {
+    attempts++;
+    const arr = isShowdown
+      ? buildShowdownFieldArchetype(players, { rng: rngField, ownershipField, salaryCap })
+      : buildFieldArchetype(players, { rng: rngField, ownershipField, salaryCap, flexEligible });
+    if (!arr) continue;
+    draws++;
+    const sig = isShowdown ? showdownSignature(arr) : signature(arr);
+    const existing = archetypeCounts.get(sig);
+    if (existing) existing.count++;
+    else archetypeCounts.set(sig, { arr, count: 1 });
+  }
+  if (draws === 0) {
+    throw new Error("Could not generate a synthetic field from this player pool — check that it has valid Ownership data.");
+  }
+  // Cap to the most frequent archetypes for simulation performance —
+  // this keeps the heavy-hitters (which carry most of the field's real
+  // weight) while dropping long-tail one-offs that barely move the result.
+  const rankedArchetypes = [...archetypeCounts.values()].sort((a, b) => b.count - a.count).slice(0, fieldSampleSize);
+  const keptDraws = rankedArchetypes.reduce((s, a) => s + a.count, 0);
+  const archetypes = rankedArchetypes.map(a => a.arr);
+  const archetypeWeights = rankedArchetypes.map(a => (a.count / keptDraws) * Math.max(0, totalEntries - 1));
+
+  // Step 2: shared team/game correlation context across user + field.
+  const allLineups = [userLineup, ...archetypes];
+  const teamOppMap = new Map();
+  for (const arr of allLineups) {
+    for (const p of arr) {
+      if (p.position === "DST") continue;
+      if (!teamOppMap.has(p.team) && p.opp) teamOppMap.set(p.team, oppTeam(p));
+    }
+  }
+  const teams = [...teamOppMap.keys()];
+  const teamsSet = new Set(teams);
+  const games = [];
+  const seenGame = new Set();
+  for (const t of teams) {
+    const opp = teamOppMap.get(t);
+    const key = [t, opp].sort().join("-");
+    if (seenGame.has(key)) continue;
+    seenGame.add(key);
+    games.push({ teamA: t, teamB: opp, key });
+  }
+  const gameOfTeam = new Map();
+  for (const g of games) { gameOfTeam.set(g.teamA, g); gameOfTeam.set(g.teamB, g); }
+
+  function gameWeightFor(game) {
+    if (!vegasContext || !game) return gameWeightBase;
+    const iA = vegasContext.impliedTotal.get(game.teamA);
+    const iB = vegasContext.impliedTotal.get(game.teamB);
+    if (iA == null || iB == null || !vegasContext.avgGameTotal) return gameWeightBase;
+    const ratio = (iA + iB) / vegasContext.avgGameTotal;
+    return Math.min(0.35, Math.max(0.05, gameWeightBase * ratio));
+  }
+
+  // Step 3: simulate. Each iteration draws one shared slate outcome, scores
+  // the user's lineup and every field archetype under it, and estimates the
+  // user's rank via the cumulative weight of archetypes that out-scored them.
+  const rngSim = mulberry32(seed);
+  let totalPayout = 0, cashCount = 0;
+  const ranks = [];
+
+  for (let it = 0; it < iterations; it++) {
+    const teamShock = new Map();
+    for (const t of teams) teamShock.set(t, boxMullerZ(rngSim));
+    const gameShock = new Map();
+    for (const g of games) gameShock.set(g.key, boxMullerZ(rngSim));
+
+    function scoreOf(arr) {
+      let total = 0;
+      for (const p of arr) {
+        const game = gameOfTeam.get(p.team);
+        const gw = game ? gameWeightFor(game) : 0;
+        const tw = teamsSet.has(p.team) ? teamWeight : 0;
+        const iw = Math.max(0, 1 - tw - gw);
+        const tShock = teamShock.get(p.team) || 0;
+        const gShock = game ? gameShock.get(game.key) : 0;
+        const iShock = boxMullerZ(rngSim);
+        const combinedZ = Math.sqrt(iw) * iShock + Math.sqrt(tw) * tShock + Math.sqrt(gw) * gShock;
+        const floorVal = (p.floor != null && !isNaN(p.floor)) ? p.floor : p.proj * 0.5;
+        let score = splitNormalFromZ(combinedZ, p.proj, floorVal, p.ceiling);
+        if (p.isCaptain) score *= 1.5;
+        total += score;
+      }
+      return total;
+    }
+
+    const userScore = scoreOf(userLineup);
+    let weightAbove = 0;
+    for (let ai = 0; ai < archetypes.length; ai++) {
+      if (scoreOf(archetypes[ai]) >= userScore) weightAbove += archetypeWeights[ai];
+    }
+    const estRank = Math.max(1, Math.round(weightAbove) + 1);
+    ranks.push(estRank);
+    const payout = payoutForRank(estRank, payoutTable);
+    totalPayout += payout;
+    if (payout > 0) cashCount++;
+  }
+
+  ranks.sort((a, b) => a - b);
+  const n = ranks.length;
+  const avgPayout = totalPayout / n;
+  return {
+    avgPayout,
+    roiPct: ((avgPayout - entryFee) / entryFee) * 100,
+    cashRatePct: (cashCount / n) * 100,
+    medianRank: ranks[Math.floor(n / 2)],
+    bestRank: ranks[0],
+    worstRank: ranks[n - 1],
+    fieldSampleSize: archetypes.length,
+    iterations: n,
+  };
+}
+
 const DFSEngine = {
   parseCSV, resolveColumns, loadPlayers, cleanNumber, SALARY_CAP, ROSTER_SLOTS, FLEX_ELIGIBLE,
   oppTeam, buildOneLineup, improveLineup, mulberry32, lineupSalary, lineupScore, signature,
   overlapCount, generateTopN, generateCorrelatedLineups,
   solveExactOptimal, boundedKnapsackTable, convolve, reconstruct, parseVegasLines, swapNeighbors,
   parseOddsApiResponse, nflTeamNameToAbbr, simulateLineups, boxMullerZ, splitNormalFromZ,
+  parsePayoutTable, parseContestEntryCount, payoutForRank, simulateContestROI,
+  buildFieldArchetype, buildShowdownFieldArchetype, weightedRandomPick,
   solveExactShowdownOptimal, buildShowdownLineup, swapShowdownNeighbors, generateShowdownTopN,
   generateShowdownCorrelated, showdownSignature, showdownSalary, showdownScore, showdownOverlapCount,
   mergeSources,
@@ -2358,6 +2702,10 @@ if (typeof window !== "undefined") {
     resultsMeta: { small: null, large: null },
     simResults: null,
     simSort: { key: "median", dir: "desc" },
+    simMode: "distribution", // "distribution" | "contest"
+    contest: { totalEntries: null, payoutTable: null, entryFee: null, rawText: "", payoutRawText: "" },
+    contestResults: null,
+    contestSort: { key: "roiPct", dir: "desc" },
     selectedTeams: new Set(),
     vegasContext: null,
   };
@@ -2735,6 +3083,7 @@ if (typeof window !== "undefined") {
     state.players = null;
     state.results = { proj: null, ceil: null, small: null, large: null };
     state.simResults = null;
+    state.contestResults = null;
     state.resultsMeta = { small: null, large: null };
     state.selectedTeams = new Set();
     state.vegasContext = null;
@@ -2912,6 +3261,7 @@ if (typeof window !== "undefined") {
     els.generateBtn.disabled = true;
     els.exportBtn.disabled = true;
     state.simResults = null; // stale relative to newly-generated lineups
+    state.contestResults = null;
     setStatus("Generating Projection lineups...");
     // Chunk the work with setTimeout so the UI can repaint status between stages.
     setTimeout(() => {
@@ -3331,10 +3681,19 @@ if (typeof window !== "undefined") {
   }
 
   function renderSimulateTab() {
+    const modeToggleHtml = `<div class="platform-row" style="margin-top:0;">
+      <button type="button" class="platform-chip${state.simMode === "distribution" ? " selected" : ""}" id="simModeDistribution">Score Distribution</button>
+      <button type="button" class="platform-chip${state.simMode === "contest" ? " selected" : ""}" id="simModeContest">Contest ROI</button>
+    </div>`;
+    const body = state.simMode === "contest" ? renderContestROISection() : renderScoreDistributionSection();
+    return modeToggleHtml + body;
+  }
+
+  function renderScoreDistributionSection() {
     const entries = collectAllLineupsForSim();
     const introHtml = `<div class="sim-intro">
       <b>What this does:</b> runs a correlated Monte Carlo simulation of each lineup's own score distribution — same-team players move together, and same-game players share some variance too (scaled by Vegas totals if you've loaded them). Floor/Ceiling are treated as roughly the 15th/85th percentile outcomes.<br><br>
-      <b>What this doesn't do:</b> this estimates <i>your</i> lineups' own range of outcomes, not contest ROI — it has no model of the payout structure or the rest of the field's lineups, so it can't tell you expected winnings, only how volatile/reliable a given lineup's own score is likely to be.
+      <b>What this doesn't do:</b> this estimates <i>your</i> lineups' own range of outcomes, not contest ROI — that's a separate mode above, since it needs the actual payout structure and field size to mean anything.
     </div>`;
 
     if (entries.length === 0) {
@@ -3405,46 +3764,211 @@ if (typeof window !== "undefined") {
     return introHtml + controlsHtml + tableHtml;
   }
 
+  /* ---------------- Contest ROI section ---------------- */
+  function renderContestROISection() {
+    const entries = collectAllLineupsForSim();
+    const introHtml = `<div class="sim-intro">
+      <b>What this does:</b> builds a synthetic opponent field by sampling players proportional to their actual ownership %, then runs the same correlated slate simulation across your lineup(s) and that whole field together — ranking you against them each iteration and mapping that rank to your payout table.<br><br>
+      <b>Real limitations, stated plainly:</b> the synthetic field samples each roster slot independently by ownership — it doesn't model opponents stacking or correlating picks the way real (and your own) lineups do, and every lineup here is treated as an <i>independently entered single ticket</i>, not part of a multi-entry strategy. Treat the ROI% as most reliable for <b>comparing your own lineups against each other</b> — which one is the stronger relative bet — rather than as a literal, precise expected-winnings promise. The payout curve here is extremely top-heavy, so a lineup's overall edge can swing the average a lot even from a small chance at 1st.
+    </div>`;
+
+    const c = state.contest;
+    const configHtml = `<div class="sim-intro" style="margin-top:0;">
+      <div class="slider-label" style="margin-bottom:6px;"><b>Contest details</b></div>
+      <textarea id="contestSummaryText" placeholder="Paste the contest description here (optional — just for auto-detecting total entries), e.g.:&#10;This 17156-player contest features $175,000.00 in total prizes and pays out the top 4135 finishing positions." rows="2" style="width:100%; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:10px; font-size:12px; font-family:monospace; resize:vertical;">${escapeHtml(c.rawText || "")}</textarea>
+      <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+        <input type="number" id="contestTotalEntries" placeholder="Total entries" value="${c.totalEntries || ""}" style="flex:1; min-width:120px; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">
+        <input type="number" id="contestEntryFee" placeholder="Entry fee ($)" value="${c.entryFee != null ? c.entryFee : ""}" step="0.01" style="flex:1; min-width:120px; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">
+      </div>
+      <div class="slider-label" style="margin:12px 0 6px;"><b>Payout table</b><span id="payoutStatus" class="vegas-status">${c.payoutTable ? c.payoutTable.length + " rows loaded" : "Not loaded"}</span></div>
+      <div class="slider-note" style="margin-bottom:8px;">Paste each position + payout on its own line, e.g. <code>1st  $15,000.00</code> or <code>7th - 8th  $2,000.00</code>.</div>
+      <textarea id="payoutTableText" placeholder="1st  \$15,000.00&#10;2nd  \$10,000.00&#10;3rd  \$7,500.00&#10;..." rows="4" style="width:100%; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:10px; font-size:12px; font-family:monospace; resize:vertical;">${escapeHtml(c.payoutRawText || "")}</textarea>
+      <button type="button" class="file-btn" id="parseContestBtn" style="margin-top:8px; width:100%;">Parse Contest Details</button>
+    </div>`;
+
+    if (entries.length === 0) {
+      return introHtml + configHtml + `<div class="empty-state"><div class="big">No lineups to evaluate yet</div>Generate lineups first, then come back here.</div>`;
+    }
+
+    const runControlsHtml = `<div class="sim-controls">
+      <div class="slider-group">
+        <div class="slider-label"><b>Simulation runs</b><span class="val" id="valContestRuns">300</span></div>
+        <input type="range" id="sliderContestRuns" min="100" max="1000" step="50" value="300">
+      </div>
+      <button type="button" class="btn btn-primary" id="runContestBtn" style="flex:0 0 auto; min-width:140px;">Run Contest ROI</button>
+    </div>
+    <div id="contestStatus" class="status-line" style="padding:0 0 12px;"></div>`;
+
+    let tableHtml = "";
+    if (state.contestResults) {
+      const sortKey = state.contestSort.key;
+      const sortDir = state.contestSort.dir;
+      const sorted = state.contestResults.slice().sort((a, b) =>
+        sortDir === "desc" ? b.result[sortKey] - a.result[sortKey] : a.result[sortKey] - b.result[sortKey]
+      );
+      const rows = sorted.map(r => {
+        const res = r.result;
+        const roiClass = res.roiPct >= 0 ? "" : ' style="color:var(--rust);"';
+        return `<tr>
+          <td class="bucket-label">${escapeHtml(r.bucket)} #${r.rank}</td>
+          <td class="num"${roiClass}>${res.roiPct >= 0 ? "+" : ""}${fmtNum(res.roiPct)}%</td>
+          <td class="num">${fmtNum(res.cashRatePct)}%</td>
+          <td class="num">${res.medianRank.toLocaleString()}</td>
+          <td class="num">${res.bestRank.toLocaleString()}</td>
+        </tr>`;
+      }).join("");
+      function th(label, key) {
+        const active = sortKey === key;
+        const arrow = active ? (sortDir === "desc" ? " ▼" : " ▲") : "";
+        return `<th class="sortable-th${active ? " active" : ""}" data-contest-sort-key="${key}">${label}${arrow}</th>`;
+      }
+      tableHtml = `<div style="overflow-x:auto"><table class="sim-table">
+        <thead><tr>
+          <th>Lineup</th>
+          ${th("ROI %", "roiPct")}
+          ${th("Cash Rate", "cashRatePct")}
+          ${th("Median Rank", "medianRank")}
+          ${th("Best Rank", "bestRank")}
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>`;
+    } else {
+      tableHtml = `<div class="empty-state"><div class="big">Not run yet</div>Load contest details above, then tap "Run Contest ROI".</div>`;
+    }
+
+    return introHtml + configHtml + runControlsHtml + tableHtml;
+  }
+
   function wireSimulateTabControls() {
+    const modeDistBtn = document.getElementById("simModeDistribution");
+    const modeContestBtn = document.getElementById("simModeContest");
+    if (modeDistBtn) modeDistBtn.addEventListener("click", () => { state.simMode = "distribution"; render(); });
+    if (modeContestBtn) modeContestBtn.addEventListener("click", () => { state.simMode = "contest"; render(); });
+
+    // --- Score Distribution controls (only present in that sub-mode) ---
     const slider = document.getElementById("sliderSimRuns");
     const val = document.getElementById("valSimRuns");
     const btn = document.getElementById("runSimBtn");
     const status = document.getElementById("simStatus");
-    if (!slider || !btn) return;
+    if (slider && btn) {
+      slider.addEventListener("input", () => { val.textContent = slider.value; });
 
-    slider.addEventListener("input", () => { val.textContent = slider.value; });
+      document.querySelectorAll(".sortable-th[data-sort-key]").forEach(th => {
+        th.addEventListener("click", () => {
+          const key = th.dataset.sortKey;
+          if (state.simSort.key === key) state.simSort.dir = state.simSort.dir === "desc" ? "asc" : "desc";
+          else { state.simSort.key = key; state.simSort.dir = "desc"; }
+          render();
+        });
+      });
 
-    document.querySelectorAll(".sortable-th").forEach(th => {
-      th.addEventListener("click", () => {
-        const key = th.dataset.sortKey;
-        if (state.simSort.key === key) {
-          state.simSort.dir = state.simSort.dir === "desc" ? "asc" : "desc";
-        } else {
-          state.simSort.key = key;
-          state.simSort.dir = "desc";
+      btn.addEventListener("click", () => {
+        const entries = collectAllLineupsForSim();
+        if (entries.length === 0) return;
+        const iterations = parseInt(slider.value, 10);
+        btn.disabled = true;
+        btn.textContent = "Simulating...";
+        status.textContent = `Running ${iterations.toLocaleString()} simulations across ${entries.length} lineups...`;
+        status.className = "status-line";
+        setTimeout(() => {
+          const arrs = entries.map(e => e.arr);
+          const statsArr = eng.simulateLineups(arrs, { iterations, seed: 1, vegasContext: state.vegasContext });
+          state.simResults = entries.map((e, i) => ({ bucket: e.bucket, rank: e.rank, stats: statsArr[i] }));
+          btn.disabled = false;
+          btn.textContent = "Run Simulation";
+          status.textContent = "Done.";
+          render();
+        }, 30);
+      });
+    }
+
+    // --- Contest ROI controls (only present in that sub-mode) ---
+    const parseBtn = document.getElementById("parseContestBtn");
+    if (parseBtn) {
+      parseBtn.addEventListener("click", () => {
+        const summaryText = document.getElementById("contestSummaryText").value;
+        const totalEntriesInput = document.getElementById("contestTotalEntries").value;
+        const entryFeeInput = document.getElementById("contestEntryFee").value;
+        const payoutText = document.getElementById("payoutTableText").value;
+        const payoutStatus = document.getElementById("payoutStatus");
+
+        state.contest.rawText = summaryText;
+        state.contest.payoutRawText = payoutText;
+
+        let totalEntries = totalEntriesInput ? parseInt(totalEntriesInput, 10) : null;
+        if (!totalEntries && summaryText.trim()) totalEntries = eng.parseContestEntryCount(summaryText);
+        state.contest.totalEntries = totalEntries || null;
+        state.contest.entryFee = entryFeeInput ? parseFloat(entryFeeInput) : null;
+
+        try {
+          if (payoutText.trim()) {
+            state.contest.payoutTable = eng.parsePayoutTable(payoutText);
+            payoutStatus.textContent = `${state.contest.payoutTable.length} rows loaded`;
+            payoutStatus.className = "vegas-status ok";
+          }
+        } catch (err) {
+          state.contest.payoutTable = null;
+          payoutStatus.textContent = "Error: " + err.message;
+          payoutStatus.className = "vegas-status err";
         }
+        render();
+      });
+    }
+
+    document.querySelectorAll(".sortable-th[data-contest-sort-key]").forEach(th => {
+      th.addEventListener("click", () => {
+        const key = th.dataset.contestSortKey;
+        if (state.contestSort.key === key) state.contestSort.dir = state.contestSort.dir === "desc" ? "asc" : "desc";
+        else { state.contestSort.key = key; state.contestSort.dir = "desc"; }
         render();
       });
     });
 
-    btn.addEventListener("click", () => {
-      const entries = collectAllLineupsForSim();
-      if (entries.length === 0) return;
-      const iterations = parseInt(slider.value, 10);
-      btn.disabled = true;
-      btn.textContent = "Simulating...";
-      status.textContent = `Running ${iterations.toLocaleString()} simulations across ${entries.length} lineups...`;
-      status.className = "status-line";
-      setTimeout(() => {
-        const arrs = entries.map(e => e.arr);
-        const statsArr = eng.simulateLineups(arrs, { iterations, seed: 1, vegasContext: state.vegasContext });
-        state.simResults = entries.map((e, i) => ({ bucket: e.bucket, rank: e.rank, stats: statsArr[i] }));
-        btn.disabled = false;
-        btn.textContent = "Run Simulation";
-        status.textContent = "Done.";
-        render();
-      }, 30);
-    });
+    const contestSlider = document.getElementById("sliderContestRuns");
+    const contestVal = document.getElementById("valContestRuns");
+    const contestBtn = document.getElementById("runContestBtn");
+    const contestStatus = document.getElementById("contestStatus");
+    if (contestSlider && contestBtn) {
+      contestSlider.addEventListener("input", () => { contestVal.textContent = contestSlider.value; });
+
+      contestBtn.addEventListener("click", () => {
+        const entries = collectAllLineupsForSim();
+        if (entries.length === 0) return;
+        const c = state.contest;
+        if (!c.totalEntries || !c.payoutTable || c.entryFee == null) {
+          contestStatus.textContent = "Missing contest details — need total entries, entry fee, and a parsed payout table.";
+          contestStatus.className = "status-line err";
+          return;
+        }
+        const iterations = parseInt(contestSlider.value, 10);
+        const isShowdown = state.contestType === "showdown";
+        contestBtn.disabled = true;
+        contestBtn.textContent = "Simulating...";
+        contestStatus.textContent = `Building synthetic field and running ${iterations.toLocaleString()} contest simulations across ${entries.length} lineups — this can take a bit longer than the score distribution...`;
+        contestStatus.className = "status-line";
+        setTimeout(() => {
+          try {
+            const results = entries.map(e => {
+              const result = eng.simulateContestROI(e.arr, state.players, {
+                totalEntries: c.totalEntries, payoutTable: c.payoutTable, entryFee: c.entryFee,
+                fieldSampleSize: 400, iterations, seed: 1,
+                ownershipField: "ownLarge", vegasContext: state.vegasContext,
+                isShowdown, salaryCap: getSalaryCap(),
+              });
+              return { bucket: e.bucket, rank: e.rank, result };
+            });
+            state.contestResults = results;
+            contestStatus.textContent = "Done.";
+          } catch (err) {
+            contestStatus.textContent = "Error: " + err.message;
+            contestStatus.className = "status-line err";
+          }
+          contestBtn.disabled = false;
+          contestBtn.textContent = "Run Contest ROI";
+          render();
+        }, 30);
+      });
+    }
   }
 
   /* ---------------- CSV Export ---------------- */

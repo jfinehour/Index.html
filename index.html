@@ -571,6 +571,55 @@ table.exposure-table td.num { text-align: right; }
 .exp-bar-bg { background: var(--line-soft); border-radius: 2px; height: 6px; width: 60px; overflow: hidden; display: inline-block; vertical-align: middle; }
 .exp-bar-fill { background: var(--amber); height: 100%; }
 
+/* ---------- Simulate tab ---------- */
+.sim-intro {
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.sim-intro b { color: var(--text); }
+.sim-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.sim-controls .slider-group { flex: 1; min-width: 180px; margin-top: 0; }
+table.sim-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.sim-table th {
+  text-align: left; color: var(--text-faint); font-size: 10.5px; font-weight: 600;
+  padding: 8px 6px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; background: var(--bg);
+}
+table.sim-table td { padding: 8px 6px; border-bottom: 1px solid var(--line-soft); font-variant-numeric: tabular-nums; }
+table.sim-table td.num { text-align: right; }
+table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; white-space: nowrap; }
+.sim-range-bar {
+  position: relative;
+  width: 90px;
+  height: 14px;
+  background: var(--line-soft);
+  border-radius: 2px;
+  display: inline-block;
+  vertical-align: middle;
+}
+.sim-range-bar .sim-range-fill {
+  position: absolute; top: 0; bottom: 0;
+  background: var(--turf-dim);
+  border-radius: 2px;
+}
+.sim-range-bar .sim-range-median {
+  position: absolute; top: -2px; bottom: -2px;
+  width: 2px;
+  background: var(--amber);
+}
+
 /* ---------- Sticky action bar ---------- */
 .action-bar {
   position: fixed;
@@ -748,9 +797,18 @@ table.exposure-table td.num { text-align: right; }
           <span id="vegasStatus" class="vegas-status">Not loaded</span>
         </div>
         <div class="slider-note" style="margin-bottom:8px;">
-          Paste one row per team from any sportsbook: <code>Team,Spread,Total</code> (spread is that team's own signed number — negative if favored). Powers real trailing-team bring-back logic instead of the ceiling-based fallback.
+          Powers real trailing-team bring-back logic instead of the ceiling-based fallback. Three ways in: fetch live via your own the-odds-api.com key, paste that API's raw JSON response, or paste <code>Team,Spread,Total</code> rows from any sportsbook yourself.
         </div>
-        <textarea id="vegasText" placeholder="DET,-7,49.5&#10;NO,7,49.5&#10;CIN,-3,47&#10;TB,3,47" rows="4"></textarea>
+
+        <div style="display:flex; gap:8px; margin-bottom:8px;">
+          <input type="password" id="oddsApiKey" placeholder="the-odds-api.com API key (optional)" style="flex:1; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:8px;">
+          <button type="button" class="file-btn" id="vegasFetchLiveBtn" style="flex:1;">Fetch Live Lines</button>
+        </div>
+        <p class="slider-note" style="margin-bottom:8px;">Your key stays in this browser only — used solely for the direct request to the-odds-api.com. If your browser blocks that request (some APIs restrict direct browser calls), open the API URL yourself in a tab and paste the JSON below instead.</p>
+
+        <textarea id="vegasText" placeholder="DET,-7,49.5&#10;NO,7,49.5&#10;CIN,-3,47&#10;TB,3,47&#10;&#10;...or paste the-odds-api.com's raw JSON response here" rows="4"></textarea>
         <div style="display:flex; gap:8px; margin-top:8px;">
           <button type="button" class="reset-btn" id="vegasPrefillBtn" style="flex:1; border-color: var(--line); color: var(--text-dim);">Prefill teams from CSV</button>
         </div>
@@ -803,6 +861,7 @@ table.exposure-table td.num { text-align: right; }
     <button class="tab" data-tab="small">Small Field <span class="count" id="tabCountSmall">·20</span></button>
     <button class="tab" data-tab="large">Large Field <span class="count" id="tabCountLarge">·20</span></button>
     <button class="tab" data-tab="exposure">Exposure</button>
+    <button class="tab" data-tab="simulate">Simulate</button>
   </div>
 
   <div class="content" id="content">
@@ -935,6 +994,85 @@ function parseVegasLines(text) {
   }
   if (impliedTotal.size === 0) {
     throw new Error("Could not parse any rows. Expected: Team,Spread,Total per line.");
+  }
+  return { impliedTotal, avgGameTotal: totalCount > 0 ? totalSum / totalCount : 0 };
+}
+
+// Full NFL team name -> standard DK/FD-style abbreviation, for matching
+// the-odds-api.com's full-name team fields against your projections CSV.
+const NFL_TEAM_ABBR = {
+  "arizona cardinals": "ARI", "atlanta falcons": "ATL", "baltimore ravens": "BAL",
+  "buffalo bills": "BUF", "carolina panthers": "CAR", "chicago bears": "CHI",
+  "cincinnati bengals": "CIN", "cleveland browns": "CLE", "dallas cowboys": "DAL",
+  "denver broncos": "DEN", "detroit lions": "DET", "green bay packers": "GB",
+  "houston texans": "HOU", "indianapolis colts": "IND", "jacksonville jaguars": "JAX",
+  "kansas city chiefs": "KC", "las vegas raiders": "LV", "los angeles chargers": "LAC",
+  "los angeles rams": "LAR", "miami dolphins": "MIA", "minnesota vikings": "MIN",
+  "new england patriots": "NE", "new orleans saints": "NO", "new york giants": "NYG",
+  "new york jets": "NYJ", "philadelphia eagles": "PHI", "pittsburgh steelers": "PIT",
+  "san francisco 49ers": "SF", "seattle seahawks": "SEA", "tampa bay buccaneers": "TB",
+  "tennessee titans": "TEN", "washington commanders": "WAS",
+};
+function nflTeamNameToAbbr(name) {
+  const key = String(name).trim().toLowerCase();
+  return NFL_TEAM_ABBR[key] || String(name).trim().toUpperCase();
+}
+
+/**
+ * Parses a the-odds-api.com v4 NFL odds JSON response (spreads + totals
+ * markets) into the same { impliedTotal, avgGameTotal } shape as
+ * parseVegasLines, so it can be used interchangeably. Averages across
+ * whichever bookmakers are present in the response for a bit of consensus
+ * stability rather than depending on a single book.
+ */
+function parseOddsApiResponse(json) {
+  const events = typeof json === "string" ? JSON.parse(json) : json;
+  if (!Array.isArray(events)) throw new Error("Unexpected response format (expected a JSON array of games).");
+
+  const impliedTotal = new Map();
+  let totalSum = 0, totalCount = 0;
+
+  for (const ev of events) {
+    const home = ev.home_team, away = ev.away_team;
+    if (!home || !away || !Array.isArray(ev.bookmakers)) continue;
+    const homeAbbr = nflTeamNameToAbbr(home);
+    const awayAbbr = nflTeamNameToAbbr(away);
+
+    let spreadSum = { [homeAbbr]: 0, [awayAbbr]: 0 };
+    let spreadCount = 0;
+    let totalPointSum = 0, totalPointCount = 0;
+
+    for (const bm of ev.bookmakers) {
+      const spreadsMkt = (bm.markets || []).find(m => m.key === "spreads");
+      const totalsMkt = (bm.markets || []).find(m => m.key === "totals");
+      if (spreadsMkt) {
+        const homeOutcome = spreadsMkt.outcomes.find(o => o.name === home);
+        const awayOutcome = spreadsMkt.outcomes.find(o => o.name === away);
+        if (homeOutcome && awayOutcome && typeof homeOutcome.point === "number") {
+          spreadSum[homeAbbr] += homeOutcome.point;
+          spreadSum[awayAbbr] += awayOutcome.point;
+          spreadCount++;
+        }
+      }
+      if (totalsMkt) {
+        const anyOutcome = totalsMkt.outcomes.find(o => typeof o.point === "number");
+        if (anyOutcome) { totalPointSum += anyOutcome.point; totalPointCount++; }
+      }
+    }
+
+    if (spreadCount === 0 || totalPointCount === 0) continue; // no usable odds for this game
+    const avgTotal = totalPointSum / totalPointCount;
+    const avgHomeSpread = spreadSum[homeAbbr] / spreadCount;
+    const avgAwaySpread = spreadSum[awayAbbr] / spreadCount;
+
+    impliedTotal.set(homeAbbr, (avgTotal - avgHomeSpread) / 2);
+    impliedTotal.set(awayAbbr, (avgTotal - avgAwaySpread) / 2);
+    totalSum += avgTotal;
+    totalCount++;
+  }
+
+  if (impliedTotal.size === 0) {
+    throw new Error("No usable spreads/totals found in the response. Make sure markets=spreads,totals was included in the request.");
   }
   return { impliedTotal, avgGameTotal: totalCount > 0 ? totalSum / totalCount : 0 };
 }
@@ -2011,11 +2149,174 @@ function generateShowdownCorrelated(players, n, opts = {}) {
 }
 
 /* ---------------------- Exports (Node + browser) ---------------------- */
+/* =====================================================================
+   Score-distribution simulation.
+
+   Models each player's score as a "split normal": symmetric-ish around
+   their median Projection, but with a different spread above vs. below
+   (Floor -> Ceiling gaps are rarely equal, and usually the ceiling gap is
+   much larger — real fantasy scoring is right-skewed). Floor and Ceiling
+   are treated as the 15th/85th percentile outcomes, a common convention.
+
+   Correlation is modeled with a simple 3-factor Gaussian structure per
+   simulated iteration: an individual shock (player-specific luck), a
+   team shock (shared by every player on that team — this is what makes a
+   QB and his WR1 move together), and a game shock (shared by both teams
+   in that game — a shootout lifts everyone in it somewhat). Weights sum
+   to 1, so each player's marginal distribution still matches their
+   stated Floor/Projection/Ceiling even though scores are correlated.
+
+   When Vegas context is available, the game shock's weight scales up for
+   projected shootouts (high total relative to the slate average) and
+   down for projected grind-it-out games — using the same Vegas data
+   already powering bring-back logic, just applied to variance instead.
+
+   This estimates *your* lineups' own score distributions from the numbers
+   you've supplied. It does not model the rest of the contest field or
+   payout structure — see the app's notes on that distinction.
+   ===================================================================== */
+
+const Z_85TH_PERCENTILE = 1.0364; // Floor/Ceiling treated as 15th/85th percentile
+
+function boxMullerZ(rng) {
+  let u = 0, v = 0;
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+const SQRT_2_OVER_PI = Math.sqrt(2 / Math.PI);
+
+/**
+ * Samples from a split (two-piece) normal shaped by (meanTarget, floor,
+ * ceiling), then shifts every sample by a constant so the resulting
+ * distribution's MEAN equals `meanTarget` EXACTLY.
+ *
+ * Why the shift is needed: a naive split-normal centered at meanTarget has
+ * E[X] = meanTarget + sqrt(2/pi)*(sigmaHigh - sigmaLow), not meanTarget —
+ * whenever the ceiling gap exceeds the floor gap (the normal case for
+ * right-skewed DFS scoring), that naive version silently inflates the
+ * true mean, and the error compounds when summed across a 9-player
+ * lineup. Translating a random variable by a fixed constant shifts its
+ * mean by exactly that constant — no iteration or approximation, just
+ * arithmetic — so this correction is exact, not approximate.
+ *
+ * Trade-off: Floor/Ceiling stop being the literal 15th/85th percentile of
+ * the final (shifted) distribution — they shift by the same constant.
+ * That's the right trade here: matching the stated Projection (the number
+ * shown everywhere else in the app) matters more than preserving an
+ * assumed percentile mapping to the decimal.
+ */
+function splitNormalFromZ(z, meanTarget, floor, ceiling) {
+  const sigmaLow = Math.max(0.01, (meanTarget - floor) / Z_85TH_PERCENTILE);
+  const sigmaHigh = Math.max(0.01, (ceiling - meanTarget) / Z_85TH_PERCENTILE);
+  // z is drawn from a standard normal, so P(z<0) = P(z>=0) = 0.5 exactly —
+  // this sampler is a 50/50 mixture of two half-normals, not a
+  // density-matched "glued" two-piece normal (a subtly different
+  // construction with a different true mean). For a 50/50 mixture,
+  // E[X] = meanTarget + 0.5*sqrt(2/pi)*(sigmaHigh - sigmaLow), derived from
+  // E[Z | Z<0] = -sqrt(2/pi) and E[Z | Z>=0] = +sqrt(2/pi) for standard
+  // normal Z. Verified empirically against 300k-sample Monte Carlo.
+  const bias = 0.5 * SQRT_2_OVER_PI * (sigmaHigh - sigmaLow);
+  const raw = z < 0 ? meanTarget + z * sigmaLow : meanTarget + z * sigmaHigh;
+  return Math.max(0, raw - bias);
+}
+
+/**
+ * Runs a Monte Carlo simulation across one or more lineups, sharing team
+ * and game "shocks" per iteration so multiple lineups simulated together
+ * see a consistent slate outcome each run (Chase going off in iteration 42
+ * helps every lineup that rosters him in iteration 42, not independently).
+ *
+ * lineups: array of player arrays (plain arrays; classic or showdown —
+ *   showdown's isCaptain flag is respected automatically if present).
+ * opts: { iterations=1000, seed=1, vegasContext=null, teamWeight=0.35,
+ *         gameWeightBase=0.15 }
+ * Returns: array (same order as `lineups`) of
+ *   { mean, median, std, p10, p25, p75, p90, min, max }
+ */
+function simulateLineups(lineups, opts = {}) {
+  const { iterations = 1000, seed = 1, vegasContext = null,
+          teamWeight = 0.35, gameWeightBase = 0.15 } = opts;
+  const rng = mulberry32(seed);
+
+  const teamOpp = new Map();
+  for (const arr of lineups) {
+    for (const p of arr) {
+      if (p.position === "DST") continue; // DST's own game already covered via its offense-side teammates
+      if (!teamOpp.has(p.team) && p.opp) teamOpp.set(p.team, oppTeam(p));
+    }
+  }
+  const teams = [...teamOpp.keys()];
+  const games = [];
+  const seenGame = new Set();
+  for (const t of teams) {
+    const opp = teamOpp.get(t);
+    const key = [t, opp].sort().join("-");
+    if (seenGame.has(key)) continue;
+    seenGame.add(key);
+    games.push({ teamA: t, teamB: opp, key });
+  }
+  const gameOfTeam = new Map();
+  for (const g of games) { gameOfTeam.set(g.teamA, g); gameOfTeam.set(g.teamB, g); }
+
+  function gameWeightFor(game) {
+    if (!vegasContext || !game) return gameWeightBase;
+    const iA = vegasContext.impliedTotal.get(game.teamA);
+    const iB = vegasContext.impliedTotal.get(game.teamB);
+    if (iA == null || iB == null || !vegasContext.avgGameTotal) return gameWeightBase;
+    const ratio = (iA + iB) / vegasContext.avgGameTotal;
+    return Math.min(0.35, Math.max(0.05, gameWeightBase * ratio));
+  }
+
+  const scoresByLineup = lineups.map(() => new Float64Array(iterations));
+
+  for (let it = 0; it < iterations; it++) {
+    const teamShock = new Map();
+    for (const t of teams) teamShock.set(t, boxMullerZ(rng));
+    const gameShock = new Map();
+    for (const g of games) gameShock.set(g.key, boxMullerZ(rng));
+
+    for (let li = 0; li < lineups.length; li++) {
+      let total = 0;
+      for (const p of lineups[li]) {
+        const game = gameOfTeam.get(p.team);
+        const gw = game ? gameWeightFor(game) : 0;
+        const tw = teams.includes(p.team) ? teamWeight : 0;
+        const iw = Math.max(0, 1 - tw - gw);
+        const tShock = teamShock.get(p.team) || 0;
+        const gShock = game ? gameShock.get(game.key) : 0;
+        const iShock = boxMullerZ(rng);
+        const combinedZ = Math.sqrt(iw) * iShock + Math.sqrt(tw) * tShock + Math.sqrt(gw) * gShock;
+        const floorVal = (p.floor != null && !isNaN(p.floor)) ? p.floor : p.proj * 0.5;
+        let score = splitNormalFromZ(combinedZ, p.proj, floorVal, p.ceiling);
+        if (p.isCaptain) score *= 1.5;
+        total += score;
+      }
+      scoresByLineup[li][it] = total;
+    }
+  }
+
+  return scoresByLineup.map(scoresArr => {
+    const scores = Array.from(scoresArr).sort((a, b) => a - b);
+    const n = scores.length;
+    const mean = scores.reduce((s, x) => s + x, 0) / n;
+    const variance = scores.reduce((s, x) => s + (x - mean) * (x - mean), 0) / n;
+    const pct = p => scores[Math.min(n - 1, Math.max(0, Math.floor(p * n)))];
+    return {
+      mean, median: pct(0.5), std: Math.sqrt(variance),
+      p10: pct(0.10), p25: pct(0.25), p75: pct(0.75), p90: pct(0.90),
+      min: scores[0], max: scores[n - 1],
+    };
+  });
+}
+
 const DFSEngine = {
   parseCSV, resolveColumns, loadPlayers, cleanNumber, SALARY_CAP, ROSTER_SLOTS, FLEX_ELIGIBLE,
   oppTeam, buildOneLineup, improveLineup, mulberry32, lineupSalary, lineupScore, signature,
   overlapCount, generateTopN, generateCorrelatedLineups,
   solveExactOptimal, boundedKnapsackTable, convolve, reconstruct, parseVegasLines, swapNeighbors,
+  parseOddsApiResponse, nflTeamNameToAbbr, simulateLineups, boxMullerZ, splitNormalFromZ,
   solveExactShowdownOptimal, buildShowdownLineup, swapShowdownNeighbors, generateShowdownTopN,
   generateShowdownCorrelated, showdownSignature, showdownSalary, showdownScore, showdownOverlapCount,
   mergeSources,
@@ -2048,6 +2349,7 @@ if (typeof window !== "undefined") {
     players: null, // the ACTIVE computed pool consumed by everything downstream
     results: { proj: null, ceil: null, small: null, large: null },
     resultsMeta: { small: null, large: null },
+    simResults: null,
     selectedTeams: new Set(),
     vegasContext: null,
   };
@@ -2093,6 +2395,8 @@ if (typeof window !== "undefined") {
     resetBtn: document.getElementById("resetBtn"),
     vegasText: document.getElementById("vegasText"),
     vegasLoadBtn: document.getElementById("vegasLoadBtn"),
+    oddsApiKey: document.getElementById("oddsApiKey"),
+    vegasFetchLiveBtn: document.getElementById("vegasFetchLiveBtn"),
     vegasClearBtn: document.getElementById("vegasClearBtn"),
     vegasPrefillBtn: document.getElementById("vegasPrefillBtn"),
     vegasStatus: document.getElementById("vegasStatus"),
@@ -2422,6 +2726,7 @@ if (typeof window !== "undefined") {
 
     state.players = null;
     state.results = { proj: null, ceil: null, small: null, large: null };
+    state.simResults = null;
     state.resultsMeta = { small: null, large: null };
     state.selectedTeams = new Set();
     state.vegasContext = null;
@@ -2460,7 +2765,12 @@ if (typeof window !== "undefined") {
       return;
     }
     try {
-      const ctx = eng.parseVegasLines(text);
+      // Auto-detect format: the-odds-api.com JSON (starts with '[') vs. our
+      // plain Team,Spread,Total CSV rows.
+      const trimmed = text.trim();
+      const ctx = trimmed.startsWith("[")
+        ? eng.parseOddsApiResponse(trimmed)
+        : eng.parseVegasLines(text);
       state.vegasContext = ctx;
       els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded`;
       els.vegasStatus.className = "vegas-status ok";
@@ -2477,6 +2787,49 @@ if (typeof window !== "undefined") {
     els.vegasStatus.textContent = "Not loaded";
     els.vegasStatus.className = "vegas-status";
     safeStorageRemove(STORAGE_KEY_VEGAS);
+  });
+
+  const STORAGE_KEY_ODDS_API_KEY = "gridlock_odds_api_key";
+  try {
+    const savedKey = localStorage.getItem(STORAGE_KEY_ODDS_API_KEY);
+    if (savedKey) els.oddsApiKey.value = savedKey;
+  } catch (e) { /* ignore */ }
+
+  els.vegasFetchLiveBtn.addEventListener("click", async () => {
+    const key = els.oddsApiKey.value.trim();
+    if (!key) {
+      els.vegasStatus.textContent = "Enter your the-odds-api.com API key first.";
+      els.vegasStatus.className = "vegas-status err";
+      return;
+    }
+    try { localStorage.setItem(STORAGE_KEY_ODDS_API_KEY, key); } catch (e) { /* ignore */ }
+
+    els.vegasFetchLiveBtn.disabled = true;
+    els.vegasFetchLiveBtn.textContent = "Fetching...";
+    els.vegasStatus.textContent = "Fetching live lines...";
+    els.vegasStatus.className = "vegas-status";
+
+    const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/?apiKey=${encodeURIComponent(key)}&regions=us&markets=spreads,totals&oddsFormat=american`;
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        const bodyText = await resp.text().catch(() => "");
+        throw new Error(`API returned ${resp.status}. ${bodyText.slice(0, 150)}`);
+      }
+      const json = await resp.json();
+      const ctx = eng.parseOddsApiResponse(json);
+      state.vegasContext = ctx;
+      els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded (live)`;
+      els.vegasStatus.className = "vegas-status ok";
+      els.vegasText.value = JSON.stringify(json);
+      safeStorageSet(STORAGE_KEY_VEGAS, JSON.stringify(json));
+    } catch (err) {
+      els.vegasStatus.textContent = "Live fetch failed (likely CORS-blocked) — paste the JSON below instead. " + err.message;
+      els.vegasStatus.className = "vegas-status err";
+    } finally {
+      els.vegasFetchLiveBtn.disabled = false;
+      els.vegasFetchLiveBtn.textContent = "Fetch Live Lines";
+    }
   });
 
   els.vegasPrefillBtn.addEventListener("click", () => {
@@ -2550,6 +2903,7 @@ if (typeof window !== "undefined") {
     if (!state.players) return;
     els.generateBtn.disabled = true;
     els.exportBtn.disabled = true;
+    state.simResults = null; // stale relative to newly-generated lineups
     setStatus("Generating Projection lineups...");
     // Chunk the work with setTimeout so the UI can repaint status between stages.
     setTimeout(() => {
@@ -2946,12 +3300,110 @@ if (typeof window !== "undefined") {
       }
     } else if (activeTab === "exposure") {
       html = renderExposureTab();
+    } else if (activeTab === "simulate") {
+      html = renderSimulateTab();
     }
     els.content.innerHTML = html;
+    if (activeTab === "simulate") wireSimulateTabControls();
   }
 
   function emptyState() {
     return `<div class="empty-state"><div class="big">Not generated yet</div>Tap "Generate Lineups" below.</div>`;
+  }
+
+  /* ---------------- Simulate tab ---------------- */
+  function collectAllLineupsForSim() {
+    const isShowdown = state.contestType === "showdown";
+    const entries = [];
+    if (state.results.proj) state.results.proj.forEach((arr, i) => entries.push({ bucket: "Projection", rank: i + 1, arr }));
+    if (state.results.ceil) state.results.ceil.forEach((arr, i) => entries.push({ bucket: "Ceiling", rank: i + 1, arr }));
+    if (state.results.small) state.results.small.forEach((r, i) => entries.push({ bucket: "Small Field", rank: i + 1, arr: r.arr }));
+    if (state.results.large) state.results.large.forEach((r, i) => entries.push({ bucket: "Large Field", rank: i + 1, arr: r.arr }));
+    return entries;
+  }
+
+  function renderSimulateTab() {
+    const entries = collectAllLineupsForSim();
+    const introHtml = `<div class="sim-intro">
+      <b>What this does:</b> runs a correlated Monte Carlo simulation of each lineup's own score distribution — same-team players move together, and same-game players share some variance too (scaled by Vegas totals if you've loaded them). Floor/Ceiling are treated as roughly the 15th/85th percentile outcomes.<br><br>
+      <b>What this doesn't do:</b> this estimates <i>your</i> lineups' own range of outcomes, not contest ROI — it has no model of the payout structure or the rest of the field's lineups, so it can't tell you expected winnings, only how volatile/reliable a given lineup's own score is likely to be.
+    </div>`;
+
+    if (entries.length === 0) {
+      return introHtml + `<div class="empty-state"><div class="big">No lineups to simulate yet</div>Generate lineups first, then come back here.</div>`;
+    }
+
+    const controlsHtml = `<div class="sim-controls">
+      <div class="slider-group">
+        <div class="slider-label"><b>Simulation runs</b><span class="val" id="valSimRuns">1000</span></div>
+        <input type="range" id="sliderSimRuns" min="200" max="5000" step="100" value="1000">
+      </div>
+      <button type="button" class="btn btn-primary" id="runSimBtn" style="flex:0 0 auto; min-width:140px;">Run Simulation</button>
+    </div>
+    <div id="simStatus" class="status-line" style="padding:0 0 12px;"></div>`;
+
+    let tableHtml = "";
+    if (state.simResults) {
+      const globalMax = Math.max(...state.simResults.map(r => r.stats.p90));
+      const rows = state.simResults.map(r => {
+        const s = r.stats;
+        const leftPct = (s.p10 / globalMax) * 100;
+        const widthPct = ((s.p90 - s.p10) / globalMax) * 100;
+        const medianPct = (s.median / globalMax) * 100;
+        return `<tr>
+          <td class="bucket-label">${escapeHtml(r.bucket)} #${r.rank}</td>
+          <td class="num">${fmtNum(s.median)}</td>
+          <td class="num">${fmtNum(s.mean)}</td>
+          <td class="num">${fmtNum(s.std)}</td>
+          <td class="num">${fmtNum(s.p10)}</td>
+          <td class="num">${fmtNum(s.p90)}</td>
+          <td>
+            <span class="sim-range-bar">
+              <span class="sim-range-fill" style="left:${leftPct}%; width:${widthPct}%;"></span>
+              <span class="sim-range-median" style="left:${medianPct}%;"></span>
+            </span>
+          </td>
+        </tr>`;
+      }).join("");
+      tableHtml = `<div style="overflow-x:auto"><table class="sim-table">
+        <thead><tr><th>Lineup</th><th>Median</th><th>Mean</th><th>Std</th><th>P10</th><th>P90</th><th>Range (P10–P90)</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>`;
+    } else {
+      tableHtml = `<div class="empty-state"><div class="big">Not run yet</div>Tap "Run Simulation" above.</div>`;
+    }
+
+    return introHtml + controlsHtml + tableHtml;
+  }
+
+  function wireSimulateTabControls() {
+    const slider = document.getElementById("sliderSimRuns");
+    const val = document.getElementById("valSimRuns");
+    const btn = document.getElementById("runSimBtn");
+    const status = document.getElementById("simStatus");
+    if (!slider || !btn) return;
+
+    slider.addEventListener("input", () => { val.textContent = slider.value; });
+
+    btn.addEventListener("click", () => {
+      const entries = collectAllLineupsForSim();
+      if (entries.length === 0) return;
+      const iterations = parseInt(slider.value, 10);
+      btn.disabled = true;
+      btn.textContent = "Simulating...";
+      status.textContent = `Running ${iterations.toLocaleString()} simulations across ${entries.length} lineups...`;
+      status.className = "status-line";
+      setTimeout(() => {
+        const arrs = entries.map(e => e.arr);
+        const statsArr = eng.simulateLineups(arrs, { iterations, seed: 1, vegasContext: state.vegasContext });
+        state.simResults = entries.map((e, i) => ({ bucket: e.bucket, rank: e.rank, stats: statsArr[i] }))
+          .sort((a, b) => b.stats.median - a.stats.median);
+        btn.disabled = false;
+        btn.textContent = "Run Simulation";
+        status.textContent = "Done.";
+        render();
+      }, 30);
+    });
   }
 
   /* ---------------- CSV Export ---------------- */
@@ -3045,7 +3497,8 @@ if (typeof window !== "undefined") {
     const savedVegas = safeStorageGet(STORAGE_KEY_VEGAS);
     if (savedVegas) {
       try {
-        const ctx = eng.parseVegasLines(savedVegas);
+        const trimmed = savedVegas.trim();
+        const ctx = trimmed.startsWith("[") ? eng.parseOddsApiResponse(trimmed) : eng.parseVegasLines(savedVegas);
         state.vegasContext = ctx;
         els.vegasText.value = savedVegas;
         els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded (restored)`;

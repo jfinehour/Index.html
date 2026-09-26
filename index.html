@@ -3989,6 +3989,7 @@ if (typeof window !== "undefined") {
     const introHtml = `<div class="sim-intro">
       <b>What this does:</b> builds a synthetic opponent field by sampling players proportional to their actual ownership %, then runs the same correlated slate simulation across your lineup(s) and that whole field together — ranking you against them each iteration and mapping that rank to your payout table.<br><br>
       <b>The field is a blend of two opponent types:</b> most are sampled independently per slot by ownership (approximating casual entrants), and a share are built with this app's own stacked, leverage-aware engine (approximating sharper opponents — many real large-field entrants use optimizer tools too, not just casual guessing). The "Sharp opponent share" slider controls that mix; there's no ground truth for the real split, so treat it as adjustable, not authoritative.<br><br>
+      <b>Field resolution matters more than it first seems:</b> the synthetic field only samples a limited number of distinct opponent rosters to stand in for the real field size. Testing this directly showed the earlier 400-archetype default made reaching literal 1st place happen far too often — beating the maximum of a small sample is mathematically easier than beating the true maximum across 17,000+ real, independently-built rosters. Push the "Field resolution" slider higher for a more realistic (if slower) estimate, especially before trusting a lineup's Best Rank.<br><br>
       <b>Real limitations, stated plainly:</b> every lineup here is treated as an <i>independently entered single ticket</i>, not part of a multi-entry strategy. This payout curve is extremely top-heavy, so <b>ROI% carries real run-to-run noise</b> even at 1,000 simulation runs — a single rare 1st-place finish swings the average enormously, and testing this confirmed ROI% can vary by hundreds of percentage points between otherwise-identical runs. <b>Cash Rate is a meaningfully more stable number</b> and worth weighting more heavily. Treat this whole tool as most reliable for <b>comparing your own lineups against each other</b>, not as a literal, precise expected-winnings promise.
     </div>`;
 
@@ -4003,6 +4004,11 @@ if (typeof window !== "undefined") {
       <div class="slider-label"><b>Sharp opponent share</b><span class="val" id="valSharpShare">35%</span></div>
       <input type="range" id="sliderSharpShare" min="0" max="80" step="5" value="35">
       <div class="slider-note">Share of the synthetic field built with this app's own stacked/correlated logic (vs. independently-sampled casual entrants). Higher = tougher, more realistic field.</div>
+    </div>
+    <div class="slider-group">
+      <div class="slider-label"><b>Field resolution</b><span class="val" id="valFieldSize">1500 archetypes</span></div>
+      <input type="range" id="sliderFieldSize" min="400" max="3000" step="200" value="1500">
+      <div class="slider-note">How many distinct opponent rosters stand in for the real field. Too few understates how hard it is to hit the very top spots — testing this directly showed the previous 400-archetype default let lineups reach literal 1st place far too easily, since beating a small sample is mathematically easier than beating 17,000+ real competitors. Higher = more realistic tail, but slower.</div>
     </div>
     <div class="sim-controls">
       <div class="slider-group">
@@ -4180,6 +4186,10 @@ if (typeof window !== "undefined") {
     const sharpVal = document.getElementById("valSharpShare");
     if (sharpSlider) sharpSlider.addEventListener("input", () => { sharpVal.textContent = sharpSlider.value + "%"; });
 
+    const fieldSizeSlider = document.getElementById("sliderFieldSize");
+    const fieldSizeVal = document.getElementById("valFieldSize");
+    if (fieldSizeSlider) fieldSizeSlider.addEventListener("input", () => { fieldSizeVal.textContent = fieldSizeSlider.value + " archetypes"; });
+
     const contestSlider = document.getElementById("sliderContestRuns");
     const contestVal = document.getElementById("valContestRuns");
     const contestBtn = document.getElementById("runContestBtn");
@@ -4198,6 +4208,7 @@ if (typeof window !== "undefined") {
         }
         const iterations = parseInt(contestSlider.value, 10);
         const sharpShare = parseInt(sharpSlider.value, 10) / 100;
+        const fieldSampleSize = parseInt(fieldSizeSlider.value, 10);
         const isShowdown = state.contestType === "showdown";
         contestBtn.disabled = true;
         contestBtn.textContent = "Simulating...";
@@ -4207,7 +4218,7 @@ if (typeof window !== "undefined") {
           try {
             contestStatus.textContent = "Building synthetic field...";
             const field = eng.buildSyntheticField(state.players, {
-              totalEntries: c.totalEntries, fieldSampleSize: 400, seed: 1, sharpShare,
+              totalEntries: c.totalEntries, fieldSampleSize, seed: 1, sharpShare,
               ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
             });
             contestStatus.textContent = `Field built (${field.archetypes.length} archetypes) — evaluating ${entries.length} lineups...`;

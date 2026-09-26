@@ -2657,11 +2657,25 @@ function simulateContestROI(userLineup, field, opts) {
   let totalPayout = 0, cashCount = 0;
   const ranks = [];
 
+  // Every unique player across the user's lineup AND every field archetype,
+  // so each real player gets exactly ONE simulated performance per
+  // iteration — shared by every lineup that rosters them. Without this, a
+  // player independently redraws "luck" for every lineup he appears in
+  // within the same iteration, which artificially decorrelates lineups
+  // that share players (including, in the extreme, two literally-identical
+  // rosters — verified this was happening before the fix).
+  const allPlayersById = new Map();
+  for (const arr of allLineups) {
+    for (const p of arr) if (!allPlayersById.has(p.id)) allPlayersById.set(p.id, p);
+  }
+
   for (let it = 0; it < iterations; it++) {
     const teamShock = new Map();
     for (const t of teams) teamShock.set(t, boxMullerZ(rngSim));
     const gameShock = new Map();
     for (const g of games) gameShock.set(g.key, boxMullerZ(rngSim));
+    const playerShock = new Map();
+    for (const id of allPlayersById.keys()) playerShock.set(id, boxMullerZ(rngSim));
 
     function scoreOf(arr) {
       let total = 0;
@@ -2672,7 +2686,7 @@ function simulateContestROI(userLineup, field, opts) {
         const iw = Math.max(0, 1 - tw - gw);
         const tShock = teamShock.get(p.team) || 0;
         const gShock = game ? gameShock.get(game.key) : 0;
-        const iShock = boxMullerZ(rngSim);
+        const iShock = playerShock.get(p.id) || 0;
         const combinedZ = Math.sqrt(iw) * iShock + Math.sqrt(tw) * tShock + Math.sqrt(gw) * gShock;
         const floorVal = (p.floor != null && !isNaN(p.floor)) ? p.floor : p.proj * 0.5;
         let score = splitNormalFromZ(combinedZ, p.proj, floorVal, p.ceiling);

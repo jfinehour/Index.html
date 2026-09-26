@@ -2750,7 +2750,14 @@ if (typeof window !== "undefined") {
   "use strict";
   const eng = window.DFSEngine;
 
-  const DEFAULT_CONTEST_PAYOUT_TEXT = `1st\t$15,000.00
+  const CONTEST_PRESET_SEEDS = [
+    {
+      id: "preset_large_single",
+      label: "Large field - Single entry",
+      totalEntries: 17156,
+      entryFee: 12,
+      rawText: "This 17156-player contest features $175,000.00 in total prizes and pays out the top 4135 finishing positions. First place wins $15,000.00.",
+      payoutRawText: `1st\t$15,000.00
 2nd\t$10,000.00
 3rd\t$7,500.00
 4th\t$5,000.00
@@ -2774,18 +2781,65 @@ if (typeof window !== "undefined") {
 751st - 1200th\t$30.00
 1201st - 1900th\t$25.00
 1901st - 2910th\t$20.00
-2911th - 4135th\t$18.00`;
+2911th - 4135th\t$18.00`,
+    },
+    {
+      id: "preset_large_5max",
+      label: "Large field - 5 entry max",
+      totalEntries: 9512,
+      entryFee: 5,
+      rawText: "This 9512-player contest features $40,000.00 in total prizes and pays out the top 1995 finishing positions. First place wins $4,000.00. (Multi-Entry [5] — evaluated here as independent single entries; see chat for the multi-entry caveat.)",
+      payoutRawText: `1st\t$4,000.00
+2nd\t$2,000.00
+3rd\t$1,000.00
+4th\t$750.00
+5th\t$600.00
+6th - 7th\t$500.00
+8th - 10th\t$400.00
+11th - 13th\t$300.00
+14th - 16th\t$250.00
+17th - 19th\t$200.00
+20th - 22nd\t$150.00
+23rd - 25th\t$100.00
+26th - 29th\t$75.00
+30th - 34th\t$60.00
+35th - 40th\t$50.00
+41st - 55th\t$40.00
+56th - 100th\t$30.00
+101st - 185th\t$25.00
+186th - 345th\t$20.00
+346th - 700th\t$15.00
+701st - 1995th\t$10.00`,
+    },
+    {
+      id: "preset_small_single",
+      label: "Small field - Single entry",
+      totalEntries: 1136,
+      entryFee: 50,
+      rawText: "This 1136-player contest features $50,000.00 in total prizes and pays out the top 258 finishing positions. First place wins $5,000.00.",
+      payoutRawText: `1st\t$5,000.00
+2nd\t$2,500.00
+3rd\t$1,500.00
+4th\t$1,000.00
+5th\t$750.00
+6th - 7th\t$600.00
+8th - 10th\t$500.00
+11th - 15th\t$450.00
+16th - 20th\t$400.00
+21st - 25th\t$350.00
+26th - 30th\t$300.00
+31st - 40th\t$250.00
+41st - 65th\t$200.00
+66th - 110th\t$150.00
+111th - 258th\t$100.00`,
+    },
+  ];
 
-  function makeDefaultContestPreset() {
-    return {
-      id: "preset_default",
-      label: "Large Field GPP ($12 / 17,156)",
-      totalEntries: 17156,
-      entryFee: 12,
-      payoutTable: eng.parsePayoutTable(DEFAULT_CONTEST_PAYOUT_TEXT),
-      payoutRawText: DEFAULT_CONTEST_PAYOUT_TEXT,
-      rawText: "This 17156-player contest features $175,000.00 in total prizes and pays out the top 4135 finishing positions. First place wins $15,000.00.",
-    };
+  function makeSeededContestPresets() {
+    return CONTEST_PRESET_SEEDS.map(seed => ({
+      ...seed,
+      payoutTable: eng.parsePayoutTable(seed.payoutRawText),
+    }));
   }
 
   const state = {
@@ -2804,8 +2858,8 @@ if (typeof window !== "undefined") {
     simResults: null,
     simSort: { key: "median", dir: "desc" },
     simMode: "distribution", // "distribution" | "contest"
-    contestPresets: [makeDefaultContestPreset()],
-    activeContestPresetId: "preset_default",
+    contestPresets: makeSeededContestPresets(),
+    activeContestPresetId: "preset_large_single",
     contestFormMode: "view", // "view" | "add" | "edit"
     contestResults: null,
     contestSort: { key: "roiPct", dir: "desc" },
@@ -4247,13 +4301,22 @@ if (typeof window !== "undefined") {
       if (savedPresetsRaw) {
         const slim = JSON.parse(savedPresetsRaw);
         if (Array.isArray(slim) && slim.length > 0) {
-          state.contestPresets = slim.map(p => {
+          const restored = slim.map(p => {
             try {
               return { ...p, payoutTable: p.payoutRawText ? eng.parsePayoutTable(p.payoutRawText) : null };
             } catch (e) {
               return { ...p, payoutTable: null };
             }
           });
+          // Merge: keep every saved preset (including ones the person edited
+          // or added themselves), but also add any of the built-in seed
+          // presets that aren't already present by id — so shipping new
+          // default contests doesn't hide them behind an old saved list
+          // from before those defaults existed.
+          const restoredIds = new Set(restored.map(p => p.id));
+          const missingSeeds = makeSeededContestPresets().filter(p => !restoredIds.has(p.id));
+          state.contestPresets = [...restored, ...missingSeeds];
+
           const savedActiveId = localStorage.getItem(STORAGE_KEY_ACTIVE_CONTEST);
           state.activeContestPresetId = (savedActiveId && state.contestPresets.some(p => p.id === savedActiveId))
             ? savedActiveId : state.contestPresets[0].id;

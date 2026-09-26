@@ -2521,26 +2521,28 @@ function payoutForRank(rank, payoutTable) {
  * Returns { avgPayout, roiPct, cashRatePct, medianRank, bestRank,
  *           worstRank, fieldSampleSize, iterations }.
  */
-function simulateContestROI(userLineup, players, opts) {
+/**
+ * Builds the synthetic opponent field ONCE — this is the expensive part
+ * (generating hundreds of archetype lineups) and doesn't depend on which
+ * user lineup will later be evaluated against it, so it should be built a
+ * single time and reused across every lineup you want to check, rather
+ * than rebuilt per-lineup.
+ */
+function buildSyntheticField(players, opts) {
   const {
-    totalEntries, payoutTable, entryFee,
-    fieldSampleSize = 400, iterations = 300, seed = 1,
-    ownershipField = "ownLarge", vegasContext = null,
-    teamWeight = 0.35, gameWeightBase = 0.15,
-    isShowdown = false, salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE,
+    totalEntries, fieldSampleSize = 400, seed = 1,
+    ownershipField = "ownLarge", isShowdown = false,
+    salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE, sharpShare = 0.35,
   } = opts;
 
-  if (!payoutTable || payoutTable.length === 0) throw new Error("No payout table provided.");
   if (!totalEntries || totalEntries < 2) throw new Error("Total entries must be at least 2.");
 
-  // Step 1: build a synthetic field via TRUE ownership-proportional
-  // sampling (see buildFieldArchetype). Rather than collecting N distinct
-  // archetypes and weighting them uniformly, we draw a larger number of
-  // raw samples and track how often each exact lineup recurs — real
-  // fields genuinely do converge heavily on the same chalk combinations,
-  // and that recurrence rate IS the field's real shape, not noise to be
-  // discarded. A lineup 15% of raw draws land on gets ~15% of the
-  // field's weight, not an equal share alongside one-off longshots.
+  // "Naive" opponents: sampled independently per slot, proportional to real
+  // ownership — approximates the casual majority of entrants. Rather than
+  // collecting N distinct archetypes and weighting them uniformly, we draw
+  // a larger number of raw samples and track recurrence — real fields
+  // genuinely do converge heavily on the same chalk combinations, and that
+  // recurrence rate IS the field's real shape, not noise to discard.
   const rngField = mulberry32((seed * 7919 + 13) >>> 0);
   const rawDrawTarget = Math.max(1500, fieldSampleSize * 4);
   const archetypeCounts = new Map(); // signature -> { arr, count }
@@ -2561,15 +2563,62 @@ function simulateContestROI(userLineup, players, opts) {
   if (draws === 0) {
     throw new Error("Could not generate a synthetic field from this player pool — check that it has valid Ownership data.");
   }
-  // Cap to the most frequent archetypes for simulation performance —
-  // this keeps the heavy-hitters (which carry most of the field's real
-  // weight) while dropping long-tail one-offs that barely move the result.
-  const rankedArchetypes = [...archetypeCounts.values()].sort((a, b) => b.count - a.count).slice(0, fieldSampleSize);
-  const keptDraws = rankedArchetypes.reduce((s, a) => s + a.count, 0);
-  const archetypes = rankedArchetypes.map(a => a.arr);
-  const archetypeWeights = rankedArchetypes.map(a => (a.count / keptDraws) * Math.max(0, totalEntries - 1));
+  const naiveTargetCount = Math.round(fieldSampleSize * (1 - sharpShare));
+  const rankedNaive = [...archetypeCounts.values()].sort((a, b) => b.count - a.count).slice(0, naiveTargetCount);
+  const keptNaiveDraws = rankedNaive.reduce((s, a) => s + a.count, 0);
 
-  // Step 2: shared team/game correlation context across user + field.
+  // "Sharp" opponents: built with this app's own stacked, leverage-aware GPP
+  // engine — approximates the more serious portion of a large field (many
+  // real entrants use optimizer tools too, not just casual guessing). Each
+  // gets equal weight within the sharp share; no single "obviously correct"
+  // sharp build dominates the way one chalk combination can for casual
+  // entrants. sharpShare is a starting assumption, not a measured constant —
+  // there's no ground truth for the real split, so treat it as adjustable.
+  const sharpTargetCount = Math.max(1, fieldSampleSize - rankedNaive.length);
+  let sharpLineups;
+  if (isShowdown) {
+    sharpLineups = generateShowdownCorrelated(players, sharpTargetCount, {
+      poolAttempts: Math.max(1200, sharpTargetCount * 10), seed: (seed * 5 + 1) >>> 0,
+      ownershipField, ownershipWeight: 0.4, maxExposureFraction: 0.6, salaryCap,
+    }).map(r => r.arr);
+  } else {
+    sharpLineups = generateCorrelatedLineups(players, sharpTargetCount, {
+      poolAttempts: Math.max(1200, sharpTargetCount * 10), seed: (seed * 5 + 1) >>> 0,
+      ownershipField, ownershipWeight: 0.4, bringBackShare: 0.5, maxExposureFraction: 0.6,
+      salaryCap, flexEligible,
+    }).map(r => r.arr);
+  }
+
+  const totalOtherEntries = Math.max(0, totalEntries - 1);
+  const naiveEntryShare = totalOtherEntries * (1 - sharpShare);
+  const sharpEntryShare = totalOtherEntries * sharpShare;
+
+  const archetypes = [...rankedNaive.map(a => a.arr), ...sharpLineups];
+  const archetypeWeights = [
+    ...rankedNaive.map(a => keptNaiveDraws > 0 ? (a.count / keptNaiveDraws) * naiveEntryShare : 0),
+    ...sharpLineups.map(() => sharpLineups.length > 0 ? sharpEntryShare / sharpLineups.length : 0),
+  ];
+
+  return { archetypes, archetypeWeights, totalEntries };
+}
+
+/**
+ * Evaluates ONE lineup against a pre-built synthetic field (see
+ * buildSyntheticField). Cheap relative to field construction — safe to
+ * call once per lineup you want to check, reusing the same field object.
+ */
+function simulateContestROI(userLineup, field, opts) {
+  const {
+    payoutTable, entryFee, iterations = 300, seed = 1,
+    vegasContext = null, teamWeight = 0.35, gameWeightBase = 0.15,
+  } = opts;
+
+  if (!payoutTable || payoutTable.length === 0) throw new Error("No payout table provided.");
+  if (!field || !field.archetypes || field.archetypes.length === 0) throw new Error("No synthetic field provided — build one with buildSyntheticField first.");
+
+  const { archetypes, archetypeWeights } = field;
+
+  // Shared team/game correlation context across user + field.
   const allLineups = [userLineup, ...archetypes];
   const teamOppMap = new Map();
   for (const arr of allLineups) {
@@ -2666,7 +2715,7 @@ const DFSEngine = {
   overlapCount, generateTopN, generateCorrelatedLineups,
   solveExactOptimal, boundedKnapsackTable, convolve, reconstruct, parseVegasLines, swapNeighbors,
   parseOddsApiResponse, nflTeamNameToAbbr, simulateLineups, boxMullerZ, splitNormalFromZ,
-  parsePayoutTable, parseContestEntryCount, payoutForRank, simulateContestROI,
+  parsePayoutTable, parseContestEntryCount, payoutForRank, simulateContestROI, buildSyntheticField,
   buildFieldArchetype, buildShowdownFieldArchetype, weightedRandomPick,
   solveExactShowdownOptimal, buildShowdownLineup, swapShowdownNeighbors, generateShowdownTopN,
   generateShowdownCorrelated, showdownSignature, showdownSalary, showdownScore, showdownOverlapCount,
@@ -2687,6 +2736,44 @@ if (typeof window !== "undefined") {
   "use strict";
   const eng = window.DFSEngine;
 
+  const DEFAULT_CONTEST_PAYOUT_TEXT = `1st\t$15,000.00
+2nd\t$10,000.00
+3rd\t$7,500.00
+4th\t$5,000.00
+5th\t$4,000.00
+6th\t$3,000.00
+7th - 8th\t$2,000.00
+9th - 10th\t$1,500.00
+11th - 15th\t$1,000.00
+16th - 20th\t$700.00
+21st - 25th\t$500.00
+26th - 30th\t$400.00
+31st - 35th\t$300.00
+36th - 45th\t$200.00
+46th - 55th\t$150.00
+56th - 75th\t$125.00
+76th - 100th\t$100.00
+101st - 150th\t$75.00
+151st - 250th\t$50.00
+251st - 450th\t$40.00
+451st - 750th\t$35.00
+751st - 1200th\t$30.00
+1201st - 1900th\t$25.00
+1901st - 2910th\t$20.00
+2911th - 4135th\t$18.00`;
+
+  function makeDefaultContestPreset() {
+    return {
+      id: "preset_default",
+      label: "Large Field GPP ($12 / 17,156)",
+      totalEntries: 17156,
+      entryFee: 12,
+      payoutTable: eng.parsePayoutTable(DEFAULT_CONTEST_PAYOUT_TEXT),
+      payoutRawText: DEFAULT_CONTEST_PAYOUT_TEXT,
+      rawText: "This 17156-player contest features $175,000.00 in total prizes and pays out the top 4135 finishing positions. First place wins $15,000.00.",
+    };
+  }
+
   const state = {
     platform: "dk", // "dk" | "fd"
     contestType: "classic", // "classic" | "showdown"
@@ -2703,7 +2790,9 @@ if (typeof window !== "undefined") {
     simResults: null,
     simSort: { key: "median", dir: "desc" },
     simMode: "distribution", // "distribution" | "contest"
-    contest: { totalEntries: null, payoutTable: null, entryFee: null, rawText: "", payoutRawText: "" },
+    contestPresets: [makeDefaultContestPreset()],
+    activeContestPresetId: "preset_default",
+    contestFormMode: "view", // "view" | "add" | "edit"
     contestResults: null,
     contestSort: { key: "roiPct", dir: "desc" },
     selectedTeams: new Set(),
@@ -2879,6 +2968,18 @@ if (typeof window !== "undefined") {
   const STORAGE_KEY_MODE = "gridlock_source_mode";
   const STORAGE_KEY_WEIGHTS = "gridlock_blend_weights";
   const STORAGE_KEY_VEGAS = "gridlock_vegas_text";
+  const STORAGE_KEY_CONTEST_PRESETS = "gridlock_contest_presets";
+  const STORAGE_KEY_ACTIVE_CONTEST = "gridlock_active_contest_id";
+
+  function persistContestPresets() {
+    try {
+      // payoutTable is derived from payoutRawText — don't duplicate it in storage,
+      // just re-parse on restore (keeps storage smaller and always in sync).
+      const slim = state.contestPresets.map(({ payoutTable, ...rest }) => rest);
+      localStorage.setItem(STORAGE_KEY_CONTEST_PRESETS, JSON.stringify(slim));
+      localStorage.setItem(STORAGE_KEY_ACTIVE_CONTEST, state.activeContestPresetId || "");
+    } catch (e) { /* ignore */ }
+  }
 
   function safeStorageSet(key, value) {
     try { localStorage.setItem(key, value); } catch (e) { /* storage unavailable (private mode, etc.) — degrade silently */ }
@@ -3765,35 +3866,80 @@ if (typeof window !== "undefined") {
   }
 
   /* ---------------- Contest ROI section ---------------- */
+  function renderContestConfigHtml(activePreset) {
+    const pickerChips = state.contestPresets.map(p => `
+      <button type="button" class="mode-chip${p.id === state.activeContestPresetId ? " selected" : ""}" data-preset-id="${p.id}">${escapeHtml(p.label)}</button>
+    `).join("");
+
+    const pickerHtml = `<div class="sim-intro" style="margin-top:0;">
+      <div class="slider-label" style="margin-bottom:8px;"><b>Contest</b></div>
+      <div class="team-chip-grid" style="margin-bottom:10px;">
+        ${pickerChips}
+        <button type="button" class="mode-chip" id="addContestBtn" style="border-style:dashed;">+ Add Contest</button>
+      </div>`;
+
+    if (state.contestFormMode === "view") {
+      const p = activePreset;
+      const summary = p ? `
+        <div class="slider-note" style="margin-bottom:4px;">
+          <b>${p.totalEntries ? p.totalEntries.toLocaleString() : "?"}</b> entries &nbsp;·&nbsp;
+          <b>$${p.entryFee != null ? p.entryFee : "?"}</b> entry &nbsp;·&nbsp;
+          <b>${p.payoutTable ? p.payoutTable.length : 0}</b> payout tiers
+        </div>` : `<div class="slider-note">No contest selected.</div>`;
+      return pickerHtml + summary + `
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button type="button" class="reset-btn" id="editContestBtn" style="flex:1;">Edit This Contest</button>
+          ${state.contestPresets.length > 1 ? `<button type="button" class="reset-btn" id="deleteContestBtn" style="flex:0 0 auto;">Delete</button>` : ""}
+        </div>
+      </div>`;
+    }
+
+    // "add" or "edit" mode — show the paste/parse form
+    const isEdit = state.contestFormMode === "edit";
+    const p = isEdit ? activePreset : { label: "", totalEntries: null, entryFee: null, rawText: "", payoutRawText: "" };
+    return pickerHtml + `
+        <div class="slider-note" style="margin:10px 0 6px;"><b>${isEdit ? "Edit" : "New"} contest name</b></div>
+        <input type="text" id="contestLabel" placeholder="e.g. Small Field Single-Entry ($5)" value="${escapeHtml(p.label || "")}" style="width:100%; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px; margin-bottom:10px;">
+        <div class="slider-label" style="margin-bottom:6px;"><b>Contest details</b></div>
+        <textarea id="contestSummaryText" placeholder="Paste the contest description here (optional — just for auto-detecting total entries), e.g.:&#10;This 17156-player contest features $175,000.00 in total prizes and pays out the top 4135 finishing positions." rows="2" style="width:100%; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:10px; font-size:12px; font-family:monospace; resize:vertical;">${escapeHtml(p.rawText || "")}</textarea>
+        <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+          <input type="number" id="contestTotalEntries" placeholder="Total entries" value="${p.totalEntries || ""}" style="flex:1; min-width:120px; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">
+          <input type="number" id="contestEntryFee" placeholder="Entry fee ($)" value="${p.entryFee != null ? p.entryFee : ""}" step="0.01" style="flex:1; min-width:120px; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">
+        </div>
+        <div class="slider-label" style="margin:12px 0 6px;"><b>Payout table</b><span id="payoutStatus" class="vegas-status">${p.payoutTable ? p.payoutTable.length + " rows loaded" : "Not loaded"}</span></div>
+        <div class="slider-note" style="margin-bottom:8px;">Paste each position + payout on its own line, e.g. <code>1st  $15,000.00</code> or <code>7th - 8th  $2,000.00</code>.</div>
+        <textarea id="payoutTableText" placeholder="1st  \$15,000.00&#10;2nd  \$10,000.00&#10;3rd  \$7,500.00&#10;..." rows="4" style="width:100%; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:10px; font-size:12px; font-family:monospace; resize:vertical;">${escapeHtml(p.payoutRawText || "")}</textarea>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button type="button" class="file-btn" id="parseContestBtn" style="flex:1;">${isEdit ? "Save Changes" : "Save New Contest"}</button>
+          <button type="button" class="reset-btn" id="cancelContestFormBtn" style="flex:0 0 auto;">Cancel</button>
+        </div>
+      </div>`;
+  }
+
   function renderContestROISection() {
     const entries = collectAllLineupsForSim();
     const introHtml = `<div class="sim-intro">
       <b>What this does:</b> builds a synthetic opponent field by sampling players proportional to their actual ownership %, then runs the same correlated slate simulation across your lineup(s) and that whole field together — ranking you against them each iteration and mapping that rank to your payout table.<br><br>
-      <b>Real limitations, stated plainly:</b> the synthetic field samples each roster slot independently by ownership — it doesn't model opponents stacking or correlating picks the way real (and your own) lineups do, and every lineup here is treated as an <i>independently entered single ticket</i>, not part of a multi-entry strategy. Treat the ROI% as most reliable for <b>comparing your own lineups against each other</b> — which one is the stronger relative bet — rather than as a literal, precise expected-winnings promise. The payout curve here is extremely top-heavy, so a lineup's overall edge can swing the average a lot even from a small chance at 1st.
+      <b>The field is a blend of two opponent types:</b> most are sampled independently per slot by ownership (approximating casual entrants), and a share are built with this app's own stacked, leverage-aware engine (approximating sharper opponents — many real large-field entrants use optimizer tools too, not just casual guessing). The "Sharp opponent share" slider controls that mix; there's no ground truth for the real split, so treat it as adjustable, not authoritative.<br><br>
+      <b>Real limitations, stated plainly:</b> every lineup here is treated as an <i>independently entered single ticket</i>, not part of a multi-entry strategy. This payout curve is extremely top-heavy, so <b>ROI% carries real run-to-run noise</b> even at 1,000 simulation runs — a single rare 1st-place finish swings the average enormously, and testing this confirmed ROI% can vary by hundreds of percentage points between otherwise-identical runs. <b>Cash Rate is a meaningfully more stable number</b> and worth weighting more heavily. Treat this whole tool as most reliable for <b>comparing your own lineups against each other</b>, not as a literal, precise expected-winnings promise.
     </div>`;
 
-    const c = state.contest;
-    const configHtml = `<div class="sim-intro" style="margin-top:0;">
-      <div class="slider-label" style="margin-bottom:6px;"><b>Contest details</b></div>
-      <textarea id="contestSummaryText" placeholder="Paste the contest description here (optional — just for auto-detecting total entries), e.g.:&#10;This 17156-player contest features $175,000.00 in total prizes and pays out the top 4135 finishing positions." rows="2" style="width:100%; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:10px; font-size:12px; font-family:monospace; resize:vertical;">${escapeHtml(c.rawText || "")}</textarea>
-      <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
-        <input type="number" id="contestTotalEntries" placeholder="Total entries" value="${c.totalEntries || ""}" style="flex:1; min-width:120px; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">
-        <input type="number" id="contestEntryFee" placeholder="Entry fee ($)" value="${c.entryFee != null ? c.entryFee : ""}" step="0.01" style="flex:1; min-width:120px; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">
-      </div>
-      <div class="slider-label" style="margin:12px 0 6px;"><b>Payout table</b><span id="payoutStatus" class="vegas-status">${c.payoutTable ? c.payoutTable.length + " rows loaded" : "Not loaded"}</span></div>
-      <div class="slider-note" style="margin-bottom:8px;">Paste each position + payout on its own line, e.g. <code>1st  $15,000.00</code> or <code>7th - 8th  $2,000.00</code>.</div>
-      <textarea id="payoutTableText" placeholder="1st  \$15,000.00&#10;2nd  \$10,000.00&#10;3rd  \$7,500.00&#10;..." rows="4" style="width:100%; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:10px; font-size:12px; font-family:monospace; resize:vertical;">${escapeHtml(c.payoutRawText || "")}</textarea>
-      <button type="button" class="file-btn" id="parseContestBtn" style="margin-top:8px; width:100%;">Parse Contest Details</button>
-    </div>`;
+    const activePreset = state.contestPresets.find(p => p.id === state.activeContestPresetId) || state.contestPresets[0];
+    const configHtml = renderContestConfigHtml(activePreset);
 
     if (entries.length === 0) {
       return introHtml + configHtml + `<div class="empty-state"><div class="big">No lineups to evaluate yet</div>Generate lineups first, then come back here.</div>`;
     }
 
-    const runControlsHtml = `<div class="sim-controls">
+    const runControlsHtml = `<div class="slider-group">
+      <div class="slider-label"><b>Sharp opponent share</b><span class="val" id="valSharpShare">35%</span></div>
+      <input type="range" id="sliderSharpShare" min="0" max="80" step="5" value="35">
+      <div class="slider-note">Share of the synthetic field built with this app's own stacked/correlated logic (vs. independently-sampled casual entrants). Higher = tougher, more realistic field.</div>
+    </div>
+    <div class="sim-controls">
       <div class="slider-group">
-        <div class="slider-label"><b>Simulation runs</b><span class="val" id="valContestRuns">300</span></div>
-        <input type="range" id="sliderContestRuns" min="100" max="1000" step="50" value="300">
+        <div class="slider-label"><b>Simulation runs</b><span class="val" id="valContestRuns">500</span></div>
+        <input type="range" id="sliderContestRuns" min="100" max="1000" step="50" value="500">
       </div>
       <button type="button" class="btn btn-primary" id="runContestBtn" style="flex:0 0 auto; min-width:140px;">Run Contest ROI</button>
     </div>
@@ -3883,34 +4029,72 @@ if (typeof window !== "undefined") {
     }
 
     // --- Contest ROI controls (only present in that sub-mode) ---
+    document.querySelectorAll(".mode-chip[data-preset-id]").forEach(chip => {
+      chip.addEventListener("click", () => {
+        state.activeContestPresetId = chip.dataset.presetId;
+        state.contestFormMode = "view";
+        render();
+      });
+    });
+
+    const addBtn = document.getElementById("addContestBtn");
+    if (addBtn) addBtn.addEventListener("click", () => { state.contestFormMode = "add"; render(); });
+
+    const editBtn = document.getElementById("editContestBtn");
+    if (editBtn) editBtn.addEventListener("click", () => { state.contestFormMode = "edit"; render(); });
+
+    const cancelBtn = document.getElementById("cancelContestFormBtn");
+    if (cancelBtn) cancelBtn.addEventListener("click", () => { state.contestFormMode = "view"; render(); });
+
+    const deleteBtn = document.getElementById("deleteContestBtn");
+    if (deleteBtn) {
+      deleteBtn.addEventListener("click", () => {
+        state.contestPresets = state.contestPresets.filter(p => p.id !== state.activeContestPresetId);
+        state.activeContestPresetId = state.contestPresets[0].id;
+        persistContestPresets();
+        render();
+      });
+    }
+
     const parseBtn = document.getElementById("parseContestBtn");
     if (parseBtn) {
       parseBtn.addEventListener("click", () => {
+        const label = document.getElementById("contestLabel").value.trim();
         const summaryText = document.getElementById("contestSummaryText").value;
         const totalEntriesInput = document.getElementById("contestTotalEntries").value;
         const entryFeeInput = document.getElementById("contestEntryFee").value;
         const payoutText = document.getElementById("payoutTableText").value;
         const payoutStatus = document.getElementById("payoutStatus");
 
-        state.contest.rawText = summaryText;
-        state.contest.payoutRawText = payoutText;
-
         let totalEntries = totalEntriesInput ? parseInt(totalEntriesInput, 10) : null;
         if (!totalEntries && summaryText.trim()) totalEntries = eng.parseContestEntryCount(summaryText);
-        state.contest.totalEntries = totalEntries || null;
-        state.contest.entryFee = entryFeeInput ? parseFloat(entryFeeInput) : null;
+        const entryFee = entryFeeInput ? parseFloat(entryFeeInput) : null;
 
+        let payoutTable = null;
         try {
-          if (payoutText.trim()) {
-            state.contest.payoutTable = eng.parsePayoutTable(payoutText);
-            payoutStatus.textContent = `${state.contest.payoutTable.length} rows loaded`;
-            payoutStatus.className = "vegas-status ok";
-          }
+          if (payoutText.trim()) payoutTable = eng.parsePayoutTable(payoutText);
         } catch (err) {
-          state.contest.payoutTable = null;
           payoutStatus.textContent = "Error: " + err.message;
           payoutStatus.className = "vegas-status err";
+          return;
         }
+
+        const isEdit = state.contestFormMode === "edit";
+        const preset = {
+          id: isEdit ? state.activeContestPresetId : "preset_" + Date.now(),
+          label: label || (totalEntries ? `Contest (${totalEntries.toLocaleString()} entries)` : "Untitled Contest"),
+          totalEntries, entryFee, payoutTable,
+          rawText: summaryText, payoutRawText: payoutText,
+        };
+
+        if (isEdit) {
+          state.contestPresets = state.contestPresets.map(p => p.id === preset.id ? preset : p);
+        } else {
+          state.contestPresets.push(preset);
+          state.activeContestPresetId = preset.id;
+        }
+        state.contestFormMode = "view";
+        persistContestPresets();
         render();
       });
     }
@@ -3924,6 +4108,10 @@ if (typeof window !== "undefined") {
       });
     });
 
+    const sharpSlider = document.getElementById("sliderSharpShare");
+    const sharpVal = document.getElementById("valSharpShare");
+    if (sharpSlider) sharpSlider.addEventListener("input", () => { sharpVal.textContent = sharpSlider.value + "%"; });
+
     const contestSlider = document.getElementById("sliderContestRuns");
     const contestVal = document.getElementById("valContestRuns");
     const contestBtn = document.getElementById("runContestBtn");
@@ -3934,13 +4122,14 @@ if (typeof window !== "undefined") {
       contestBtn.addEventListener("click", () => {
         const entries = collectAllLineupsForSim();
         if (entries.length === 0) return;
-        const c = state.contest;
-        if (!c.totalEntries || !c.payoutTable || c.entryFee == null) {
+        const c = state.contestPresets.find(p => p.id === state.activeContestPresetId);
+        if (!c || !c.totalEntries || !c.payoutTable || c.entryFee == null) {
           contestStatus.textContent = "Missing contest details — need total entries, entry fee, and a parsed payout table.";
           contestStatus.className = "status-line err";
           return;
         }
         const iterations = parseInt(contestSlider.value, 10);
+        const sharpShare = parseInt(sharpSlider.value, 10) / 100;
         const isShowdown = state.contestType === "showdown";
         contestBtn.disabled = true;
         contestBtn.textContent = "Simulating...";
@@ -3948,12 +4137,16 @@ if (typeof window !== "undefined") {
         contestStatus.className = "status-line";
         setTimeout(() => {
           try {
+            contestStatus.textContent = "Building synthetic field...";
+            const field = eng.buildSyntheticField(state.players, {
+              totalEntries: c.totalEntries, fieldSampleSize: 400, seed: 1, sharpShare,
+              ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
+            });
+            contestStatus.textContent = `Field built (${field.archetypes.length} archetypes) — evaluating ${entries.length} lineups...`;
             const results = entries.map(e => {
-              const result = eng.simulateContestROI(e.arr, state.players, {
-                totalEntries: c.totalEntries, payoutTable: c.payoutTable, entryFee: c.entryFee,
-                fieldSampleSize: 400, iterations, seed: 1,
-                ownershipField: "ownLarge", vegasContext: state.vegasContext,
-                isShowdown, salaryCap: getSalaryCap(),
+              const result = eng.simulateContestROI(e.arr, field, {
+                payoutTable: c.payoutTable, entryFee: c.entryFee, iterations,
+                vegasContext: state.vegasContext,
               });
               return { bucket: e.bucket, rank: e.rank, result };
             });
@@ -4035,6 +4228,23 @@ if (typeof window !== "undefined") {
       if (savedPlatform === "fd" || savedPlatform === "dk") setPlatform(savedPlatform);
       const savedContest = localStorage.getItem(STORAGE_KEY_CONTEST);
       if (savedContest === "classic" || savedContest === "showdown") setContestType(savedContest);
+
+      const savedPresetsRaw = localStorage.getItem(STORAGE_KEY_CONTEST_PRESETS);
+      if (savedPresetsRaw) {
+        const slim = JSON.parse(savedPresetsRaw);
+        if (Array.isArray(slim) && slim.length > 0) {
+          state.contestPresets = slim.map(p => {
+            try {
+              return { ...p, payoutTable: p.payoutRawText ? eng.parsePayoutTable(p.payoutRawText) : null };
+            } catch (e) {
+              return { ...p, payoutTable: null };
+            }
+          });
+          const savedActiveId = localStorage.getItem(STORAGE_KEY_ACTIVE_CONTEST);
+          state.activeContestPresetId = (savedActiveId && state.contestPresets.some(p => p.id === savedActiveId))
+            ? savedActiveId : state.contestPresets[0].id;
+        }
+      }
     } catch (e) { /* ignore */ }
 
     const savedMode = safeStorageGet(STORAGE_KEY_MODE);

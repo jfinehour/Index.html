@@ -3876,10 +3876,14 @@ if (typeof window !== "undefined") {
         state.generationPool = pool;
         state.buildInfo = { showdown: true, structure: describeStructure(structure), scenarioInfo };
 
-        state.results.proj = eng.generateShowdownTopN(pool, p => p.proj, 10, { attempts: 500, seed: 1, salaryCap, structure });
+        // Structure (5-1/4-2/3-3 + team) is a construction preference, the
+        // Showdown analog of Classic's Stack Size — it only applies to the
+        // GPP tabs below, not here. Projection/Ceiling stay the true
+        // unconstrained optimum (still under the game-script pool, if set).
+        state.results.proj = eng.generateShowdownTopN(pool, p => p.proj, 10, { attempts: 500, seed: 1, salaryCap });
         setStatus("Generating Ceiling lineups...");
         setTimeout(() => {
-          state.results.ceil = eng.generateShowdownTopN(pool, p => p.ceiling, 5, { attempts: 500, seed: 7, salaryCap, structure });
+          state.results.ceil = eng.generateShowdownTopN(pool, p => p.ceiling, 5, { attempts: 500, seed: 7, salaryCap });
           setStatus("Generating Small Field GPP lineups...");
           setTimeout(() => {
             const n = parseInt(els.sliderGppCount.value, 10);
@@ -4277,25 +4281,36 @@ if (typeof window !== "undefined") {
     }
     if (["proj", "ceil", "small", "large"].includes(activeTab)) {
       const res = state.results[activeTab];
-      if (res && res.length === 0) html = emptyResultNotice();
-      html = renderBuildInfoBanner() + html;
+      if (res && res.length === 0) html = emptyResultNotice(activeTab);
+      html = renderBuildInfoBanner(activeTab) + html;
     }
     els.content.innerHTML = html;
     if (activeTab === "simulate") wireSimulateTabControls();
   }
 
-  function emptyResultNotice() {
-    const why = state.contestType === "showdown"
-      ? "Nothing under the salary cap fits the current roster structure. Loosen the structure or majority-team choice and generate again."
-      : "Nothing satisfied the current stack settings. Try a smaller stack or turn off the secondary/tertiary game stacks and generate again.";
+  function emptyResultNotice(tab) {
+    let why;
+    if (state.contestType === "showdown") {
+      // Structure only constrains Small/Large — an empty Projection/Ceiling
+      // tab in Showdown can only be a salary/roster-legality issue, not a
+      // structure conflict.
+      why = (tab === "small" || tab === "large")
+        ? "Nothing under the salary cap fits the current roster structure. Loosen the structure or majority-team choice and generate again."
+        : "Nothing under the salary cap forms a legal 6-player roster with both teams represented. Check your player pool and salary cap.";
+    } else {
+      why = "Nothing satisfied the current stack settings. Try a smaller stack or turn off the secondary/tertiary game stacks and generate again.";
+    }
     return `<div class="empty-state"><div class="big">No lineups fit those settings</div>${why}</div>`;
   }
 
-  function renderBuildInfoBanner() {
+  function renderBuildInfoBanner(tab) {
     const b = state.buildInfo;
     if (!b || !b.showdown) return "";
     const parts = [];
-    if (b.structure) parts.push(`<span><b>Structure:</b> ${escapeHtml(b.structure)}</span>`);
+    // Structure only constrains Small Field / Large Field — showing it on
+    // Projection/Ceiling would wrongly imply those are constrained too.
+    const structureApplies = tab === "small" || tab === "large";
+    if (structureApplies && b.structure) parts.push(`<span><b>Structure:</b> ${escapeHtml(b.structure)}</span>`);
     const si = b.scenarioInfo;
     if (si) {
       const [tA, tB] = si.teams;

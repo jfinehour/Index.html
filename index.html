@@ -1930,27 +1930,26 @@ function showdownScore(arr, scoreFn) {
 
 /**
  * Build-structure constraint for a two-team showdown pool.
- * A structure describes how the 6 roster spots split between the two
- * teams (CPT counts): 5-1, 4-2, or 3-3. 6-0 is never legal (DraftKings
- * requires at least one player from each team).
+ * A structure is a list of specific (count, team) configs — e.g. "5-1
+ * with CIN as the 5" and "4-2 with TB as the 4" can both be allowed at
+ * once, each pinned to its own team. 6-0 is never legal (DraftKings
+ * requires at least one player from each team); 3-3 has no majority team,
+ * so its config's team is ignored.
  *
  *   structure = {
- *     allowed: Set<number> | null,   // allowed MAJORITY counts, e.g. {4,3};
- *                                    // null/empty = any legal split
- *     majorityTeam: string | null    // this team must have MORE players
+ *     configs: Array<{ count: 5 | 4 | 3, team: string | null }>
+ *       // team === null means "either team may hold this count"
+ *       // empty/missing configs = unconstrained ("Any")
  *   }
  */
 function showdownSplitAllowed(kA, kB, teams, structure) {
   if (kA < 1 || kB < 1) return false;
-  if (!structure) return true;
+  if (!structure || !structure.configs || structure.configs.length === 0) return true;
   const majority = Math.max(kA, kB);
-  if (structure.allowed && structure.allowed.size > 0 && !structure.allowed.has(majority)) return false;
-  if (structure.majorityTeam) {
-    if (kA === kB) return false; // a 3-3 split has no majority team
-    const majTeam = kA > kB ? teams[0] : teams[1];
-    if (majTeam !== structure.majorityTeam) return false;
-  }
-  return true;
+  const majTeam = kA === kB ? null : (kA > kB ? teams[0] : teams[1]);
+  return structure.configs.some(cfg =>
+    cfg.count === majority && (majority === 3 || cfg.team == null || cfg.team === majTeam)
+  );
 }
 
 function showdownStructureOk(arr, structure, teams) {
@@ -1964,7 +1963,7 @@ function showdownStructureOk(arr, structure, teams) {
 }
 
 function structureIsConstraining(structure) {
-  return !!structure && ((structure.allowed && structure.allowed.size > 0) || !!structure.majorityTeam);
+  return !!structure && !!structure.configs && structure.configs.length > 0;
 }
 
 /**
@@ -3143,7 +3142,7 @@ if (typeof window !== "undefined") {
     simResults: null,
     simSort: { key: "median", dir: "desc" },
     // Showdown build controls: roster split (5-1 / 4-2 / 3-3) and game script
-    showdownScript: { structures: new Set(), majorityTeam: null, winner: null, total: null, line: "" },
+    showdownScript: { configs: new Set(), winner: null, total: null, line: "" },
     generationPool: null, // the player pool the current lineups were actually built from
     buildInfo: null,      // what to show in the banner above showdown lineups
     simMode: "distribution", // "distribution" | "contest"
@@ -3286,15 +3285,10 @@ if (typeof window !== "undefined") {
 
 
   function describeStructure(structure) {
-    if (!structure) return null;
-    const parts = [];
-    if (structure.allowed && structure.allowed.size) {
-      parts.push([...structure.allowed].sort((a, b) => b - a).map(k => `${k}-${6 - k}`).join(" or "));
-    }
-    if (structure.majorityTeam) {
-      parts.push(structure.allowed && structure.allowed.size ? `${structure.majorityTeam} as the majority` : `any split with ${structure.majorityTeam} as the majority`);
-    }
-    return parts.join(", ");
+    if (!structure || !structure.configs || structure.configs.length === 0) return null;
+    return structure.configs
+      .map(cfg => cfg.count === 3 ? "3-3" : `${cfg.count}-${6 - cfg.count} ${cfg.team ? cfg.team : "(either team)"}`)
+      .join(" or ");
   }
 
   function renderShowdownScriptControls() {
@@ -3306,7 +3300,11 @@ if (typeof window !== "undefined") {
       body.innerHTML = `<div class="slider-note">Load a two-team (single-game) showdown slate to unlock roster structure and game-script options.</div>`;
       return;
     }
-    if (sc.majorityTeam && !teams.includes(sc.majorityTeam)) sc.majorityTeam = null;
+    // Drop any saved config that no longer matches this slate's teams.
+    for (const key of [...sc.configs]) {
+      const [, team] = key.split(":");
+      if (team !== "any" && !teams.includes(team)) sc.configs.delete(key);
+    }
     if (sc.winner && !teams.includes(sc.winner)) sc.winner = null;
 
     const chip = (attr, label, selected, disabled) =>
@@ -3316,15 +3314,14 @@ if (typeof window !== "undefined") {
       <div class="team-chip-grid">${chips.join("")}</div>
       ${note ? `<div class="slider-note" style="margin-top:6px;">${note}</div>` : ""}`;
 
+    // Each structure choice is paired directly with a team: which side gets
+    // the majority. Pick several — e.g. "5-1 CIN" and "4-2 TB" together —
+    // and a lineup matching ANY of them is allowed.
     const structChips = [
-      chip('data-sd-structure="any"', "Any", sc.structures.size === 0, false),
-      chip('data-sd-structure="5"', "5-1", sc.structures.has(5), false),
-      chip('data-sd-structure="4"', "4-2", sc.structures.has(4), false),
-      chip('data-sd-structure="3"', "3-3", sc.structures.has(3), !!sc.majorityTeam),
-    ];
-    const majorityChips = [
-      chip('data-sd-majority="either"', "Either", !sc.majorityTeam, false),
-      ...teams.map(t => chip(`data-sd-majority="${escapeHtml(t)}"`, escapeHtml(t), sc.majorityTeam === t, false)),
+      chip('data-sd-config="any"', "Any split", sc.configs.size === 0, false),
+      ...teams.map(t => chip(`data-sd-config="5:${escapeHtml(t)}"`, `5-1 ${escapeHtml(t)}`, sc.configs.has(`5:${t}`), false)),
+      ...teams.map(t => chip(`data-sd-config="4:${escapeHtml(t)}"`, `4-2 ${escapeHtml(t)}`, sc.configs.has(`4:${t}`), false)),
+      chip('data-sd-config="3:any"', "3-3", sc.configs.has("3:any"), false),
     ];
     const winnerChips = [
       chip('data-sd-winner="any"', "Any", !sc.winner, false),
@@ -3347,10 +3344,8 @@ if (typeof window !== "undefined") {
         style="width:100%; margin-top:8px; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">` : "";
 
     body.innerHTML =
-      row("Roster structure (players from each team, CPT included)", structChips,
-        "Pick one or more. \"Any\" leaves the split open. 6-0 is never legal — DraftKings needs at least one player from each team.") +
-      row("Majority team (for 5-1 / 4-2)", majorityChips,
-        sc.majorityTeam ? "3-3 is unavailable while a majority team is set (it has no majority)." : "") +
+      row("Roster structure — pick which team is stacked", structChips,
+        "Pick one or more, each paired with a team. \"5-1 CIN\" and \"4-2 TB\" can both be on at once — a lineup matching either is allowed. \"Any split\" leaves it open. 6-0 is never legal — DraftKings needs at least one player from each team.") +
       row("Game script: who wins", winnerChips, "") +
       row("Game script: total", totalChips, "") + lineInput +
       `<div class="slider-note" style="margin-top:10px;">${baseline} Picking a winner and/or total re-derives every player's projection, ceiling and floor from simulated games that match — so lineups are built for that world, not the average one.</div>`;
@@ -3361,15 +3356,10 @@ if (typeof window !== "undefined") {
     if (!btn || btn.disabled) return;
     const sc = state.showdownScript;
     const d = btn.dataset;
-    if (d.sdStructure !== undefined) {
-      if (d.sdStructure === "any") sc.structures.clear();
-      else {
-        const k = parseInt(d.sdStructure, 10);
-        if (sc.structures.has(k)) sc.structures.delete(k); else sc.structures.add(k);
-      }
-    } else if (d.sdMajority !== undefined) {
-      if (d.sdMajority === "either") sc.majorityTeam = null;
-      else { sc.majorityTeam = d.sdMajority; sc.structures.delete(3); }
+    if (d.sdConfig !== undefined) {
+      if (d.sdConfig === "any") sc.configs.clear();
+      else if (sc.configs.has(d.sdConfig)) sc.configs.delete(d.sdConfig);
+      else sc.configs.add(d.sdConfig);
     } else if (d.sdWinner !== undefined) {
       sc.winner = d.sdWinner === "any" ? null : d.sdWinner;
     } else if (d.sdTotal !== undefined) {
@@ -3377,6 +3367,7 @@ if (typeof window !== "undefined") {
     } else return;
     renderShowdownScriptControls();
   });
+
   els.showdownScriptBody.addEventListener("input", (e) => {
     if (e.target && e.target.id === "sdLine") state.showdownScript.line = e.target.value;
   });
@@ -3854,8 +3845,11 @@ if (typeof window !== "undefined") {
       if (state.contestType === "showdown") {
         const script = state.showdownScript;
         const sdTeams = showdownTeams();
-        const structure = (sdTeams.length === 2 && (script.structures.size > 0 || script.majorityTeam))
-          ? { allowed: script.structures.size > 0 ? new Set(script.structures) : null, majorityTeam: script.majorityTeam }
+        const structure = (sdTeams.length === 2 && script.configs.size > 0)
+          ? { configs: [...script.configs].map(key => {
+              const [countStr, team] = key.split(":");
+              return { count: parseInt(countStr, 10), team: team === "any" ? null : team };
+            }) }
           : null;
 
         // Game-script scenario: rebuild the pool's projections from simulated

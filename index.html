@@ -670,6 +670,8 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
 }
 
 
+.mode-chip.chip-disabled, .mode-chip:disabled { opacity: 0.4; cursor: not-allowed; }
+
 </style>
 </head>
 <body>
@@ -788,14 +790,19 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
 
       <div class="slider-group" id="secondaryStackGroup">
         <div class="slider-label"><b>Secondary game stack</b><span class="val" id="valSecondaryStack">Off</span></div>
-        <input type="range" id="sliderSecondaryStack" min="0" max="3" value="0" step="1">
-        <div class="slider-note">Also lock in this many same-team RB/WR/TE from a second, unrelated game — spreads correlation across multiple games instead of one.</div>
+        <input type="range" id="sliderSecondaryStack" min="0" max="2" value="0" step="1">
+        <div class="slider-note">A second game stack from a different game than your QB's: RB/WR/TE with <b>at least one player from each team</b> in that game. 2 players = one from each side; 3 players = both sides plus one more.</div>
       </div>
 
       <div class="slider-group" id="tertiaryStackGroup">
         <div class="slider-label"><b>Tertiary game stack</b><span class="val" id="valTertiaryStack">Off</span></div>
-        <input type="range" id="sliderTertiaryStack" min="0" max="3" value="0" step="1">
-        <div class="slider-note">A third correlated game stack. Requires Secondary to be on first.</div>
+        <input type="range" id="sliderTertiaryStack" min="0" max="2" value="0" step="1">
+        <div class="slider-note">A third game stack, same rules (both teams, a game not already used). Requires Secondary to be on first.</div>
+      </div>
+
+      <div class="slider-group" id="showdownScriptGroup" style="display:none;">
+        <div class="slider-label" style="margin-bottom:6px;"><b>Showdown build</b></div>
+        <div id="showdownScriptBody"></div>
       </div>
 
       <div class="slider-group toggle-group" id="vegasGroup">
@@ -804,7 +811,7 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
           <span id="vegasStatus" class="vegas-status">Not loaded</span>
         </div>
         <div class="slider-note" style="margin-bottom:8px;">
-          Powers real trailing-team bring-back logic instead of the ceiling-based fallback. Three ways in: fetch live via your own the-odds-api.com key, paste that API's raw JSON response, or paste <code>Team,Spread,Total</code> rows from any sportsbook yourself.
+          Powers real trailing-team bring-back logic instead of the ceiling-based fallback, and in Showdown it sets the baseline for game-script scenarios. Three ways in: fetch live via your own the-odds-api.com key, paste that API's raw JSON response, or paste <code>Team,Spread,Total</code> rows from any sportsbook yourself.
         </div>
 
         <div style="display:flex; gap:8px; margin-bottom:8px;">
@@ -1372,48 +1379,54 @@ function buildOneLineup(pool, opts) {
     }
   }
 
-  // 3.5 Secondary/tertiary GAME stacks: 2+ RB/WR/TE from the SAME team in a
-  // DIFFERENT game than the QB's, to spread correlation across multiple
-  // games instead of concentrating it all in one. Each additional stack
-  // picks its own team (excluding games already used) and locks that many
-  // teammates from it.
-  function buildTeamMiniStack(size, excludeTeams) {
-    let chosenTeam = null;
+  // 3.5 Secondary/tertiary GAME stacks: RB/WR/TE from ONE game other than
+  // the QB's, with at least one player from EACH of that game's two teams
+  // (a true game stack, not just a same-team stack). Each additional stack
+  // picks its own game — never the QB's game, never a game already used —
+  // spreading correlation across several games instead of one.
+  const gameKeyOf = (p) => [p.team, oppTeam(p)].sort().join("-");
+
+  function buildGameMiniStack(size, excludeGameKeys) {
+    let chosenGame = null;
     let placedCount = 0;
+    const teamsPlaced = new Set();
     for (let s = 0; s < size; s++) {
       const filledSoFar = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: flexUsed ? 1 : 0 };
-      const candidates = [...byPos.RB, ...byPos.WR, ...byPos.TE].filter(
-        p => !used.has(p.id) && !excludeTeams.has(p.team) &&
-             (chosenTeam === null || p.team === chosenTeam) &&
+      const picksLeft = size - s;
+      let candidates = [...byPos.RB, ...byPos.WR, ...byPos.TE].filter(
+        p => !used.has(p.id) && !excludeGameKeys.has(gameKeyOf(p)) &&
+             (chosenGame === null || gameKeyOf(p) === chosenGame) &&
              p.salary <= salaryLeft - remainingSlotsAfter(filledSoFar) * 3000
       );
+      // Both teams must be represented by the time the stack is complete:
+      // if only one side is in so far and this is the last pick, it has to
+      // come from the other side.
+      if (chosenGame !== null && teamsPlaced.size < 2 && picksLeft === 1) {
+        candidates = candidates.filter(p => !teamsPlaced.has(p.team));
+      }
       if (candidates.length === 0) break;
       candidates.sort((a, b) => weight(b) - weight(a));
       const pick = pickWeighted(candidates, rng, topK);
-      if (chosenTeam === null) chosenTeam = pick.team;
-      if (place(pick)) placedCount++;
+      if (chosenGame === null) chosenGame = gameKeyOf(pick);
+      if (place(pick)) { placedCount++; teamsPlaced.add(pick.team); }
       else break;
     }
-    return { placedCount, team: chosenTeam };
+    return { complete: placedCount >= size && teamsPlaced.size >= 2, gameKey: chosenGame };
   }
 
   let secondaryStackSatisfied = secondaryStackSize <= 0;
   let tertiaryStackSatisfied = tertiaryStackSize <= 0;
 
   if (secondaryStackSize > 0) {
-    const excludeTeams = new Set([qbTeam, qbOppTeam]);
-    const res = buildTeamMiniStack(secondaryStackSize, excludeTeams);
-    secondaryStackSatisfied = res.placedCount >= secondaryStackSize;
+    const excludeGames = new Set([[qbTeam, qbOppTeam].sort().join("-")]);
+    const res = buildGameMiniStack(secondaryStackSize, excludeGames);
+    secondaryStackSatisfied = res.complete;
 
     if (tertiaryStackSize > 0) {
-      const excludeTeams2 = new Set([qbTeam, qbOppTeam]);
-      if (res.team) {
-        excludeTeams2.add(res.team);
-        const secPlayer = pool.find(p => p.team === res.team);
-        if (secPlayer && secPlayer.opp) excludeTeams2.add(secPlayer.opp);
-      }
-      const res2 = buildTeamMiniStack(tertiaryStackSize, excludeTeams2);
-      tertiaryStackSatisfied = res2.placedCount >= tertiaryStackSize;
+      const excludeGames2 = new Set(excludeGames);
+      if (res.gameKey) excludeGames2.add(res.gameKey);
+      const res2 = buildGameMiniStack(tertiaryStackSize, excludeGames2);
+      tertiaryStackSatisfied = res2.complete;
     }
   }
 
@@ -1472,23 +1485,31 @@ function improveLineup(lineup, pool, scoreFn, opts = {}) {
     const o = qbOppOf(arrX);
     return arrX.some(p => p.position !== "QB" && p.position !== "DST" && p.team === o);
   }
-  // Approximate check: are there enough distinct non-QB-game teams with
-  // enough players to satisfy the requested secondary/tertiary stack sizes?
-  // Greedy largest-requirement-to-largest-available matching — cheap and
-  // correct for the realistic case of at most 2 extra requirements.
+  // Are there enough DISTINCT non-QB games, each holding at least one RB/WR/TE
+  // from BOTH of its teams, with enough total players to satisfy the
+  // requested secondary/tertiary stack sizes? Greedy largest-requirement to
+  // largest-available matching is exact for at most two requirements.
   function hasAdditionalStacksArr(arrX) {
     if (secondaryStackSize <= 0 && tertiaryStackSize <= 0) return true;
-    const qbT = qbTeamOf(arrX), qbO = qbOppOf(arrX);
-    const counts = {};
+    const qb = arrX.find(p => p.position === "QB");
+    const qbGame = qb ? [qb.team, oppTeam(qb)].sort().join("-") : null;
+    const games = new Map(); // gameKey -> Map(team -> count)
     for (const p of arrX) {
       if (p.position === "QB" || p.position === "DST") continue;
-      if (p.team === qbT || p.team === qbO) continue;
-      counts[p.team] = (counts[p.team] || 0) + 1;
+      const key = [p.team, oppTeam(p)].sort().join("-");
+      if (key === qbGame) continue;
+      if (!games.has(key)) games.set(key, new Map());
+      const byTeam = games.get(key);
+      byTeam.set(p.team, (byTeam.get(p.team) || 0) + 1);
     }
-    const available = Object.values(counts).sort((a, b) => b - a);
+    const totals = [];
+    for (const byTeam of games.values()) {
+      if (byTeam.size >= 2) totals.push([...byTeam.values()].reduce((a, b) => a + b, 0));
+    }
+    totals.sort((a, b) => b - a);
     const needed = [secondaryStackSize, tertiaryStackSize].filter(n => n > 0).sort((a, b) => b - a);
     for (let i = 0; i < needed.length; i++) {
-      if (!(available[i] >= needed[i])) return false;
+      if (!(totals[i] >= needed[i])) return false;
     }
     return true;
   }
@@ -1907,14 +1928,114 @@ function showdownScore(arr, scoreFn) {
   return arr.reduce((s, p) => s + scoreFn(p) * (p.isCaptain ? 1.5 : 1), 0);
 }
 
+/**
+ * Build-structure constraint for a two-team showdown pool.
+ * A structure describes how the 6 roster spots split between the two
+ * teams (CPT counts): 5-1, 4-2, or 3-3. 6-0 is never legal (DraftKings
+ * requires at least one player from each team).
+ *
+ *   structure = {
+ *     allowed: Set<number> | null,   // allowed MAJORITY counts, e.g. {4,3};
+ *                                    // null/empty = any legal split
+ *     majorityTeam: string | null    // this team must have MORE players
+ *   }
+ */
+function showdownSplitAllowed(kA, kB, teams, structure) {
+  if (kA < 1 || kB < 1) return false;
+  if (!structure) return true;
+  const majority = Math.max(kA, kB);
+  if (structure.allowed && structure.allowed.size > 0 && !structure.allowed.has(majority)) return false;
+  if (structure.majorityTeam) {
+    if (kA === kB) return false; // a 3-3 split has no majority team
+    const majTeam = kA > kB ? teams[0] : teams[1];
+    if (majTeam !== structure.majorityTeam) return false;
+  }
+  return true;
+}
+
+function showdownStructureOk(arr, structure, teams) {
+  if (teams.length === 2) {
+    const kA = arr.filter(p => p.team === teams[0]).length;
+    return showdownSplitAllowed(kA, arr.length - kA, teams, structure);
+  }
+  // Not a clean two-team slate: fall back to the plain "both teams
+  // represented" rule and ignore structure.
+  return teams.length < 2 || new Set(arr.map(p => p.team)).size >= 2;
+}
+
+function structureIsConstraining(structure) {
+  return !!structure && ((structure.allowed && structure.allowed.size > 0) || !!structure.majorityTeam);
+}
+
+/**
+ * Exact two-team showdown solve, structure-aware. For every possible
+ * Captain, and every way of splitting the 5 FLEX spots between the two
+ * teams (that yields a legal overall structure), solve each team's share
+ * as its own exact bounded knapsack and combine them across the budget.
+ */
+function solveExactShowdownTwoTeam(players, scoreFn, salaryCap, structure, teams) {
+  const BUCKET = 100;
+  const [tA, tB] = teams;
+  const poolByTeam = { [tA]: players.filter(p => p.team === tA), [tB]: players.filter(p => p.team === tB) };
+  const capFull = Math.floor(salaryCap / BUCKET);
+  const fullTable = {
+    [tA]: boundedKnapsackTable(poolByTeam[tA], 5, capFull, scoreFn),
+    [tB]: boundedKnapsackTable(poolByTeam[tB], 5, capFull, scoreFn),
+  };
+  let best = null;
+
+  for (const cpt of players) {
+    const cptSalary = cpt.salary * 1.5;
+    if (cptSalary > salaryCap) continue;
+    const cptScore = scoreFn(cpt) * 1.5;
+    const capBucket = Math.floor((salaryCap - cptSalary) / BUCKET);
+    const ownTeam = cpt.team;
+    const otherTeam = ownTeam === tA ? tB : tA;
+    const ownTable = boundedKnapsackTable(poolByTeam[ownTeam].filter(p => p.id !== cpt.id), 5, capBucket, scoreFn);
+    const otherTable = fullTable[otherTeam];
+
+    for (let fOwn = 0; fOwn <= 5; fOwn++) {
+      const fOther = 5 - fOwn;
+      const kOwn = fOwn + 1, kOther = fOther;
+      const kA = ownTeam === tA ? kOwn : kOther;
+      const kB = ownTeam === tA ? kOther : kOwn;
+      if (!showdownSplitAllowed(kA, kB, teams, structure)) continue;
+
+      let bestVal = -Infinity, bestB1 = -1;
+      for (let b1 = 0; b1 <= capBucket; b1++) {
+        const v1 = ownTable.dp[fOwn][b1];
+        if (v1 === -Infinity) continue;
+        const v2 = otherTable.dp[fOther][capBucket - b1];
+        if (v2 === -Infinity) continue;
+        if (v1 + v2 > bestVal) { bestVal = v1 + v2; bestB1 = b1; }
+      }
+      if (bestB1 < 0) continue;
+      const score = cptScore + bestVal;
+      if (best && score <= best.score) continue;
+
+      const flex = [
+        ...reconstruct(ownTable, fOwn, bestB1),
+        ...reconstruct(otherTable, fOther, capBucket - bestB1),
+      ];
+      const arr = [{ ...cpt, isCaptain: true }, ...flex.map(p => ({ ...p, isCaptain: false }))];
+      if (arr.length === 6 && showdownSalary(arr) <= salaryCap) best = { arr, score };
+    }
+  }
+  return best;
+}
+
 /** Exact solve: iterate every possible Captain, exactly knapsack-solve the
- * best 5 FLEX for each, handling the both-teams-required constraint via a
- * "force in the best required-team player" fallback when the unconstrained
- * optimum doesn't naturally include both teams. */
+ * best 5 FLEX for each. For a clean two-team slate this goes through the
+ * structure-aware solver above. Otherwise it uses the older path, which
+ * handles the both-teams-required constraint via a "force in the best
+ * required-team player" fallback. */
 function solveExactShowdownOptimal(players, scoreFn, opts = {}) {
   const salaryCap = opts.salaryCap || 50000;
   const BUCKET = 100;
   const teams = [...new Set(players.map(p => p.team))];
+  if (teams.length === 2) {
+    return solveExactShowdownTwoTeam(players, scoreFn, salaryCap, opts.structure || null, teams);
+  }
   let best = null;
 
   for (const cpt of players) {
@@ -1965,13 +2086,27 @@ function solveExactShowdownOptimal(players, scoreFn, opts = {}) {
 }
 
 /** Randomized heuristic construction: pick a CPT, then 5 FLEX, ensuring
- * both teams end up represented. */
+ * both teams end up represented. When a build structure is requested
+ * (e.g. 4-2 with DET as the 4), a target split is drawn first and each
+ * team's head count is enforced slot by slot. */
 function buildShowdownLineup(pool, opts) {
   const { scoreFn, rng, noise = 0.15, topK = 5, salaryCap = 50000,
-          exposure = new Map(), maxExposure = null } = opts;
+          exposure = new Map(), maxExposure = null, structure = null } = opts;
   const teams = [...new Set(pool.map(p => p.team))];
   const used = new Set();
   let salaryLeft = salaryCap;
+
+  // Structure: draw a target head count per team up front.
+  let need = null;
+  if (teams.length === 2 && structureIsConstraining(structure)) {
+    const splits = [];
+    for (let kA = 1; kA <= 5; kA++) {
+      if (showdownSplitAllowed(kA, 6 - kA, teams, structure)) splits.push([kA, 6 - kA]);
+    }
+    if (splits.length === 0) return null;
+    const [kA, kB] = splits[Math.floor(rng() * splits.length)];
+    need = { [teams[0]]: kA, [teams[1]]: kB };
+  }
 
   function weight(p, isCaptain) {
     let base = scoreFn(p) * (isCaptain ? 1.5 : 1);
@@ -1983,20 +2118,21 @@ function buildShowdownLineup(pool, opts) {
   }
 
   // 1. Captain
-  let cptCandidates = pool.filter(p => p.salary * 1.5 <= salaryLeft - 5 * 2000);
+  let cptCandidates = pool.filter(p => p.salary * 1.5 <= salaryLeft - 5 * 2000 && (!need || need[p.team] > 0));
   if (cptCandidates.length === 0) return null;
   cptCandidates.sort((a, b) => weight(b, true) - weight(a, true));
   const cpt = pickWeighted(cptCandidates, rng, topK);
   used.add(cpt.id);
   salaryLeft -= cpt.salary * 1.5;
+  if (need) need[cpt.team]--;
 
   // 2. Five FLEX, forcing team coverage on the last pick if still needed
   const flex = [];
   for (let i = 0; i < 5; i++) {
     const remaining = 5 - i;
     const minFloor = (remaining - 1) * 2000;
-    let candidates = pool.filter(p => !used.has(p.id) && p.salary <= salaryLeft - minFloor);
-    if (remaining === 1 && teams.length >= 2) {
+    let candidates = pool.filter(p => !used.has(p.id) && p.salary <= salaryLeft - minFloor && (!need || need[p.team] > 0));
+    if (!need && remaining === 1 && teams.length >= 2) {
       const teamsSoFar = new Set([cpt.team, ...flex.map(p => p.team)]);
       if (teamsSoFar.size < 2) {
         const missing = teams.find(t => !teamsSoFar.has(t));
@@ -2008,13 +2144,13 @@ function buildShowdownLineup(pool, opts) {
     const pick = pickWeighted(candidates, rng, topK);
     used.add(pick.id);
     salaryLeft -= pick.salary;
+    if (need) need[pick.team]--;
     flex.push(pick);
   }
 
   const arr = [{ ...cpt, isCaptain: true }, ...flex.map(p => ({ ...p, isCaptain: false }))];
   if (showdownSalary(arr) > salaryCap) return null;
-  const teamsCovered = new Set(arr.map(p => p.team));
-  if (teams.length >= 2 && teamsCovered.size < 2) return null;
+  if (!showdownStructureOk(arr, structure, teams)) return null;
   return arr;
 }
 
@@ -2024,6 +2160,7 @@ function buildShowdownLineup(pool, opts) {
  * matter — many near-optimal showdown lineups differ only in who's CPT. */
 function swapShowdownNeighbors(arr, pool, scoreFn, opts = {}) {
   const salaryCap = opts.salaryCap || 50000;
+  const structure = opts.structure || null;
   const teams = [...new Set(pool.map(p => p.team))];
   const usedIds = new Set(arr.map(p => p.id));
   const neighbors = [];
@@ -2040,7 +2177,7 @@ function swapShowdownNeighbors(arr, pool, scoreFn, opts = {}) {
       if (newContribution > salaryLeftIfRemoved) continue;
       const newArr = arr.slice();
       newArr[i] = { ...c, isCaptain: p.isCaptain };
-      if (teams.length >= 2 && new Set(newArr.map(x => x.team)).size < 2) continue;
+      if (!showdownStructureOk(newArr, structure, teams)) continue;
       neighbors.push(newArr);
     }
   }
@@ -2057,7 +2194,7 @@ function swapShowdownNeighbors(arr, pool, scoreFn, opts = {}) {
 }
 
 function generateShowdownTopN(players, metricFn, n, opts = {}) {
-  const { attempts = 500, seed = 1, salaryCap = 50000 } = opts;
+  const { attempts = 500, seed = 1, salaryCap = 50000, structure = null } = opts;
   const rng = mulberry32(seed);
   const results = new Map();
 
@@ -2071,7 +2208,7 @@ function generateShowdownTopN(players, metricFn, n, opts = {}) {
 
   let exactSeed = null;
   try {
-    const exact = solveExactShowdownOptimal(players, metricFn, { salaryCap });
+    const exact = solveExactShowdownOptimal(players, metricFn, { salaryCap, structure });
     if (exact) { consider(exact.arr); exactSeed = exact.arr; }
   } catch (e) { /* exact solver is a pure enhancement */ }
 
@@ -2079,7 +2216,7 @@ function generateShowdownTopN(players, metricFn, n, opts = {}) {
   for (let round = 0; round < 3 && frontier.length > 0; round++) {
     const found = [];
     for (const seedArr of frontier) {
-      for (const nb of swapShowdownNeighbors(seedArr, players, metricFn, { salaryCap })) {
+      for (const nb of swapShowdownNeighbors(seedArr, players, metricFn, { salaryCap, structure })) {
         if (consider(nb)) found.push(nb);
       }
     }
@@ -2088,7 +2225,7 @@ function generateShowdownTopN(players, metricFn, n, opts = {}) {
   }
 
   for (let i = 0; i < attempts; i++) {
-    const built = buildShowdownLineup(players, { scoreFn: metricFn, rng, noise: 0.10, salaryCap });
+    const built = buildShowdownLineup(players, { scoreFn: metricFn, rng, noise: 0.10, salaryCap, structure });
     if (built) consider(built);
   }
 
@@ -2107,7 +2244,8 @@ function showdownOverlapCount(a, b) {
  * ownership-fade leverage score, plus exposure/overlap diversity. */
 function generateShowdownCorrelated(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, ownershipField = "own",
-          maxExposureFraction = 0.4, maxOverlap = 4, salaryCap = 50000, ceilingWeight = 1.0 } = opts;
+          maxExposureFraction = 0.4, maxOverlap = 4, salaryCap = 50000, ceilingWeight = 1.0,
+          structure = null } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
 
@@ -2121,7 +2259,7 @@ function generateShowdownCorrelated(players, n, opts = {}) {
   const candidates = [];
   const seenSigs = new Set();
   for (let i = 0; i < poolAttempts; i++) {
-    const built = buildShowdownLineup(players, { scoreFn: leverageScore, rng, noise: 0.30, topK: 14, salaryCap });
+    const built = buildShowdownLineup(players, { scoreFn: leverageScore, rng, noise: 0.30, topK: 14, salaryCap, structure });
     if (!built) continue;
     const sig = showdownSignature(built);
     if (seenSigs.has(sig)) continue;
@@ -2723,6 +2861,152 @@ function simulateContestROI(userLineup, field, opts) {
   };
 }
 
+/* =====================================================================
+   Showdown game-script scenarios ("build around DET winning" / "build
+   around the over").
+
+   Rather than hard-coding arbitrary boosts ("winner +10%"), scenario
+   projections come out of the same correlated model the simulator uses:
+
+     1. Simulate the single game many times. Each run draws a shared
+        shock per team and one for the game as a whole, and turns them
+        into team points:
+            points = base + POINTS_PER_SD * (sqrt(tw)*teamShock + sqrt(gw)*gameShock)
+        POINTS_PER_SD = 13 is calibrated so the model behaves like real
+        NFL lines (team-points std ~9, game-total std ~15, and a 7-point
+        favorite wins ~74% of the time — checked in testing).
+     2. Keep only runs matching the chosen outcome (winner and/or
+        over/under the line).
+     3. Score every player in each kept run and take the average — that
+        conditional average is the player's scenario projection; the
+        15th/85th percentiles of the kept runs become his scenario
+        floor/ceiling.
+
+   Defenses are the one place team shocks can't be treated like offense:
+   a DST tends to score MORE when its own team plays well and the opposing
+   offense struggles, and LESS in a shootout — so a DST's shock loads
+   negatively on the opponent's team shock and on the game shock.
+
+   base points come from Vegas implied totals when loaded, otherwise the
+   entered line split evenly (or 22.5 each if neither is available).
+   ===================================================================== */
+
+const SCENARIO_POINTS_PER_SD = 13;
+
+function buildShowdownScenarioPool(players, opts = {}) {
+  const {
+    winner = null, total = null, line = null, vegasContext = null,
+    targetAccepted = 3000, maxAttempts = 150000, seed = 101,
+    teamWeight = 0.35, gameWeight = 0.15, force = false,
+  } = opts;
+
+  if (!winner && !total && !force) return { players, info: null };
+
+  const teams = [...new Set(players.map(p => p.team))];
+  if (teams.length !== 2) {
+    throw new Error("Game-script scenarios need a two-team (single-game) slate.");
+  }
+  const [tA, tB] = teams;
+  if (winner && winner !== tA && winner !== tB) throw new Error(`Winner "${winner}" isn't one of the two teams in this game.`);
+
+  let baseA = 22.5, baseB = 22.5;
+  if (vegasContext && vegasContext.impliedTotal.has(tA) && vegasContext.impliedTotal.has(tB)) {
+    baseA = vegasContext.impliedTotal.get(tA);
+    baseB = vegasContext.impliedTotal.get(tB);
+  } else if (line != null && !isNaN(line)) {
+    baseA = baseB = line / 2;
+  }
+  const totalLine = (line != null && !isNaN(line)) ? line : baseA + baseB;
+
+  const rng = mulberry32(seed >>> 0);
+  const tw = teamWeight, gw = gameWeight, iw = Math.max(0, 1 - tw - gw);
+  const P = SCENARIO_POINTS_PER_SD;
+  const n = players.length;
+  const floors = players.map(p => (p.floor != null && !isNaN(p.floor)) ? p.floor : p.proj * 0.5);
+
+  // Every simulated game is scored (matched or not) so a baseline exists
+  // under the identical model; scenario values are then applied as SHIFTS
+  // relative to that baseline. That cancels model quirks that would
+  // otherwise leak in as bias — notably the non-negativity clamp, which
+  // nudges low-floor players' means up even with no scenario at all.
+  const BASE_CAP = 20000;
+  const baseScores = players.map(() => new Float64Array(BASE_CAP));
+  const scores = players.map(() => new Float64Array(targetAccepted));
+  let baseN = 0;
+  let accepted = 0, attempts = 0, sumA = 0, sumB = 0, winsA = 0;
+
+  while (accepted < targetAccepted && attempts < maxAttempts) {
+    attempts++;
+    const TA = boxMullerZ(rng), TB = boxMullerZ(rng), G = boxMullerZ(rng);
+    const ptsA = baseA + P * (Math.sqrt(tw) * TA + Math.sqrt(gw) * G);
+    const ptsB = baseB + P * (Math.sqrt(tw) * TB + Math.sqrt(gw) * G);
+    const aWon = ptsA > ptsB;
+    if (aWon) winsA++;
+    const tot = ptsA + ptsB;
+    const passes =
+      (!winner || (winner === tA) === aWon) &&
+      (total !== "over" || tot > totalLine) &&
+      (total !== "under" || tot < totalLine);
+    const recordBase = baseN < BASE_CAP;
+    if (!passes && !recordBase) continue;
+
+    for (let j = 0; j < n; j++) {
+      const p = players[j];
+      const I = boxMullerZ(rng);
+      const own = p.team === tA ? TA : TB;
+      const opp = p.team === tA ? TB : TA;
+      let z;
+      if (p.position === "DST") {
+        z = Math.sqrt(iw) * I + Math.sqrt(tw / 2) * own - Math.sqrt(tw / 2) * opp - Math.sqrt(gw) * G;
+      } else {
+        z = Math.sqrt(iw) * I + Math.sqrt(tw) * own + Math.sqrt(gw) * G;
+      }
+      const sc = splitNormalFromZ(z, p.proj, floors[j], p.ceiling);
+      if (recordBase) baseScores[j][baseN] = sc;
+      if (passes) scores[j][accepted] = sc;
+    }
+    if (recordBase) baseN++;
+    if (passes) { sumA += ptsA; sumB += ptsB; accepted++; }
+  }
+
+  if (accepted < 150) {
+    throw new Error(
+      `That scenario is too unlikely under the model — only ${accepted} of ${attempts.toLocaleString()} simulated games matched. ` +
+      `Try dropping the total or the side (or moving the line closer to the Vegas total).`
+    );
+  }
+
+  const stats = (arr, count) => {
+    const s = Float64Array.from(arr.subarray(0, count)).sort();
+    let sum = 0;
+    for (let i = 0; i < count; i++) sum += s[i];
+    const q = f => s[Math.min(count - 1, Math.floor(f * count))];
+    return { mean: sum / count, p15: q(0.15), p85: q(0.85) };
+  };
+
+  const outPlayers = players.map((p, j) => {
+    const c = stats(scores[j], accepted);
+    const b = stats(baseScores[j], baseN);
+    const proj = Math.max(0, p.proj + (c.mean - b.mean));
+    const ceiling = Math.max(proj, p.ceiling + (c.p85 - b.p85));
+    const hasFloor = p.floor != null && !isNaN(p.floor);
+    const floor = hasFloor ? Math.min(proj, Math.max(0, p.floor + (c.p15 - b.p15))) : p.floor;
+    return { ...p, baseProj: p.proj, baseCeiling: p.ceiling, baseFloor: p.floor, proj, ceiling, floor };
+  });
+
+  return {
+    players: outPlayers,
+    info: {
+      teams: [tA, tB], winner, total, line: total ? totalLine : null,
+      accepted, attempts, acceptanceRate: accepted / attempts,
+      avgPoints: { [tA]: sumA / accepted, [tB]: sumB / accepted },
+      avgTotal: (sumA + sumB) / accepted,
+      baseTotal: baseA + baseB, baseAWinProb: winsA / attempts,
+      lowSample: accepted < 800,
+    },
+  };
+}
+
 const DFSEngine = {
   parseCSV, resolveColumns, loadPlayers, cleanNumber, SALARY_CAP, ROSTER_SLOTS, FLEX_ELIGIBLE,
   oppTeam, buildOneLineup, improveLineup, mulberry32, lineupSalary, lineupScore, signature,
@@ -2730,6 +3014,7 @@ const DFSEngine = {
   solveExactOptimal, boundedKnapsackTable, convolve, reconstruct, parseVegasLines, swapNeighbors,
   parseOddsApiResponse, nflTeamNameToAbbr, simulateLineups, boxMullerZ, splitNormalFromZ,
   parsePayoutTable, parseContestEntryCount, payoutForRank, simulateContestROI, buildSyntheticField,
+  showdownStructureOk, showdownSplitAllowed, buildShowdownScenarioPool,
   buildFieldArchetype, buildShowdownFieldArchetype, weightedRandomPick,
   solveExactShowdownOptimal, buildShowdownLineup, swapShowdownNeighbors, generateShowdownTopN,
   generateShowdownCorrelated, showdownSignature, showdownSalary, showdownScore, showdownOverlapCount,
@@ -2857,6 +3142,10 @@ if (typeof window !== "undefined") {
     resultsMeta: { small: null, large: null },
     simResults: null,
     simSort: { key: "median", dir: "desc" },
+    // Showdown build controls: roster split (5-1 / 4-2 / 3-3) and game script
+    showdownScript: { structures: new Set(), majorityTeam: null, winner: null, total: null, line: "" },
+    generationPool: null, // the player pool the current lineups were actually built from
+    buildInfo: null,      // what to show in the banner above showdown lineups
     simMode: "distribution", // "distribution" | "contest"
     contestPresets: makeSeededContestPresets(),
     activeContestPresetId: "preset_large_single",
@@ -2928,6 +3217,8 @@ if (typeof window !== "undefined") {
     bringbackGroup: document.getElementById("bringbackGroup"),
     teFlexGroup: document.getElementById("teFlexGroup"),
     vegasGroup: document.getElementById("vegasGroup"),
+    showdownScriptGroup: document.getElementById("showdownScriptGroup"),
+    showdownScriptBody: document.getElementById("showdownScriptBody"),
   };
 
   let activeTab = "proj";
@@ -2972,7 +3263,11 @@ if (typeof window !== "undefined") {
     els.tertiaryStackGroup.style.display = showClassicOnly;
     els.bringbackGroup.style.display = showClassicOnly;
     els.teFlexGroup.style.display = showClassicOnly;
-    els.vegasGroup.style.display = showClassicOnly;
+    // Vegas lines now matter in both modes (bring-backs in Classic; the
+    // game-script baseline in Showdown).
+    els.vegasGroup.style.display = "block";
+    els.showdownScriptGroup.style.display = c === "showdown" ? "block" : "none";
+    renderShowdownScriptControls();
     if (c === "showdown") {
       els.teamPickerGroup.style.display = "none";
     } else if (loadedSlots().length > 0) {
@@ -2980,6 +3275,111 @@ if (typeof window !== "undefined") {
     }
     try { localStorage.setItem(STORAGE_KEY_CONTEST, c); } catch (e) { /* ignore */ }
   }
+
+
+  /* ---------------- Showdown build controls (structure + game script) ---------------- */
+  function showdownTeams() {
+    if (!state.players) return [];
+    const t = [...new Set(state.players.map(p => p.team))];
+    return t.length === 2 ? t : [];
+  }
+
+
+  function describeStructure(structure) {
+    if (!structure) return null;
+    const parts = [];
+    if (structure.allowed && structure.allowed.size) {
+      parts.push([...structure.allowed].sort((a, b) => b - a).map(k => `${k}-${6 - k}`).join(" or "));
+    }
+    if (structure.majorityTeam) {
+      parts.push(structure.allowed && structure.allowed.size ? `${structure.majorityTeam} as the majority` : `any split with ${structure.majorityTeam} as the majority`);
+    }
+    return parts.join(", ");
+  }
+
+  function renderShowdownScriptControls() {
+    const body = els.showdownScriptBody;
+    if (!body) return;
+    const teams = showdownTeams();
+    const sc = state.showdownScript;
+    if (teams.length !== 2) {
+      body.innerHTML = `<div class="slider-note">Load a two-team (single-game) showdown slate to unlock roster structure and game-script options.</div>`;
+      return;
+    }
+    if (sc.majorityTeam && !teams.includes(sc.majorityTeam)) sc.majorityTeam = null;
+    if (sc.winner && !teams.includes(sc.winner)) sc.winner = null;
+
+    const chip = (attr, label, selected, disabled) =>
+      `<button type="button" class="mode-chip${selected ? " selected" : ""}${disabled ? " chip-disabled" : ""}" ${attr}${disabled ? " disabled" : ""}>${label}</button>`;
+    const row = (title, chips, note) => `
+      <div class="slider-note" style="margin:10px 0 6px;"><b>${title}</b></div>
+      <div class="team-chip-grid">${chips.join("")}</div>
+      ${note ? `<div class="slider-note" style="margin-top:6px;">${note}</div>` : ""}`;
+
+    const structChips = [
+      chip('data-sd-structure="any"', "Any", sc.structures.size === 0, false),
+      chip('data-sd-structure="5"', "5-1", sc.structures.has(5), false),
+      chip('data-sd-structure="4"', "4-2", sc.structures.has(4), false),
+      chip('data-sd-structure="3"', "3-3", sc.structures.has(3), !!sc.majorityTeam),
+    ];
+    const majorityChips = [
+      chip('data-sd-majority="either"', "Either", !sc.majorityTeam, false),
+      ...teams.map(t => chip(`data-sd-majority="${escapeHtml(t)}"`, escapeHtml(t), sc.majorityTeam === t, false)),
+    ];
+    const winnerChips = [
+      chip('data-sd-winner="any"', "Any", !sc.winner, false),
+      ...teams.map(t => chip(`data-sd-winner="${escapeHtml(t)}"`, `${escapeHtml(t)} wins`, sc.winner === t, false)),
+    ];
+    const totalChips = [
+      chip('data-sd-total="any"', "Any", !sc.total, false),
+      chip('data-sd-total="over"', "Over", sc.total === "over", false),
+      chip('data-sd-total="under"', "Under", sc.total === "under", false),
+    ];
+
+    const v = state.vegasContext;
+    const hasVegas = v && v.impliedTotal.has(teams[0]) && v.impliedTotal.has(teams[1]);
+    const baseline = hasVegas
+      ? `Baseline from your Vegas lines: ${escapeHtml(teams[0])} ${v.impliedTotal.get(teams[0]).toFixed(1)} – ${escapeHtml(teams[1])} ${v.impliedTotal.get(teams[1]).toFixed(1)} (total ${(v.impliedTotal.get(teams[0]) + v.impliedTotal.get(teams[1])).toFixed(1)}).`
+      : `No Vegas lines for this game yet — the baseline defaults to an even 45-point game unless you enter a line below.`;
+
+    const lineInput = sc.total ? `
+      <input type="number" id="sdLine" step="0.5" placeholder="Line (defaults to the Vegas total)" value="${escapeHtml(String(sc.line || ""))}"
+        style="width:100%; margin-top:8px; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">` : "";
+
+    body.innerHTML =
+      row("Roster structure (players from each team, CPT included)", structChips,
+        "Pick one or more. \"Any\" leaves the split open. 6-0 is never legal — DraftKings needs at least one player from each team.") +
+      row("Majority team (for 5-1 / 4-2)", majorityChips,
+        sc.majorityTeam ? "3-3 is unavailable while a majority team is set (it has no majority)." : "") +
+      row("Game script: who wins", winnerChips, "") +
+      row("Game script: total", totalChips, "") + lineInput +
+      `<div class="slider-note" style="margin-top:10px;">${baseline} Picking a winner and/or total re-derives every player's projection, ceiling and floor from simulated games that match — so lineups are built for that world, not the average one.</div>`;
+  }
+
+  els.showdownScriptBody.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn || btn.disabled) return;
+    const sc = state.showdownScript;
+    const d = btn.dataset;
+    if (d.sdStructure !== undefined) {
+      if (d.sdStructure === "any") sc.structures.clear();
+      else {
+        const k = parseInt(d.sdStructure, 10);
+        if (sc.structures.has(k)) sc.structures.delete(k); else sc.structures.add(k);
+      }
+    } else if (d.sdMajority !== undefined) {
+      if (d.sdMajority === "either") sc.majorityTeam = null;
+      else { sc.majorityTeam = d.sdMajority; sc.structures.delete(3); }
+    } else if (d.sdWinner !== undefined) {
+      sc.winner = d.sdWinner === "any" ? null : d.sdWinner;
+    } else if (d.sdTotal !== undefined) {
+      sc.total = d.sdTotal === "any" ? null : d.sdTotal;
+    } else return;
+    renderShowdownScriptControls();
+  });
+  els.showdownScriptBody.addEventListener("input", (e) => {
+    if (e.target && e.target.id === "sdLine") state.showdownScript.line = e.target.value;
+  });
 
   els.platformDK.addEventListener("click", () => setPlatform("dk"));
   els.platformFD.addEventListener("click", () => setPlatform("fd"));
@@ -3006,11 +3406,15 @@ if (typeof window !== "undefined") {
   els.sliderStackSize.addEventListener("input", () => {
     els.valStackSize.textContent = "QB + " + els.sliderStackSize.value;
   });
+  // Slider positions 0/1/2 map to Off / 2 players / 3 players. A "stack"
+  // here is a game stack (both teams), so one player alone can't qualify.
+  const stackSizeFromSlider = (v) => (v === 0 ? 0 : v + 1);
+  const stackLabelFromSlider = (v) => (v === 0 ? "Off" : v === 1 ? "2 players (1 + 1)" : "3 players (2 + 1)");
   function updateSecondaryTertiaryLabels() {
     const sec = parseInt(els.sliderSecondaryStack.value, 10);
     const ter = parseInt(els.sliderTertiaryStack.value, 10);
-    els.valSecondaryStack.textContent = sec === 0 ? "Off" : `${sec} players`;
-    els.valTertiaryStack.textContent = ter === 0 ? "Off" : `${ter} players`;
+    els.valSecondaryStack.textContent = stackLabelFromSlider(sec);
+    els.valTertiaryStack.textContent = stackLabelFromSlider(ter);
     // Tertiary only makes sense once secondary is on — clamp it off otherwise,
     // and grey out the control so it's clear why.
     const tertiaryAllowed = sec > 0;
@@ -3193,6 +3597,7 @@ if (typeof window !== "undefined") {
       els.teamChipGrid.innerHTML = "";
       els.teamPickerGroup.style.display = "none";
       updateTeamPickerCount();
+      renderShowdownScriptControls();
       return;
     }
 
@@ -3214,6 +3619,7 @@ if (typeof window !== "undefined") {
     els.fileStatus.className = "file-status ok";
     els.generateBtn.disabled = false;
     populateTeamChips(players);
+    renderShowdownScriptControls();
   }
 
   els.pasteToggle.addEventListener("click", () => {
@@ -3254,8 +3660,11 @@ if (typeof window !== "undefined") {
     state.simResults = null;
     state.contestResults = null;
     state.resultsMeta = { small: null, large: null };
+    state.generationPool = null;
+    state.buildInfo = null;
     state.selectedTeams = new Set();
     state.vegasContext = null;
+    renderShowdownScriptControls();
     safeStorageRemove(STORAGE_KEY_VEGAS);
 
     els.fileStatus.textContent = "No projections active yet";
@@ -3298,6 +3707,7 @@ if (typeof window !== "undefined") {
         ? eng.parseOddsApiResponse(trimmed)
         : eng.parseVegasLines(text);
       state.vegasContext = ctx;
+      renderShowdownScriptControls();
       els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded`;
       els.vegasStatus.className = "vegas-status ok";
       safeStorageSet(STORAGE_KEY_VEGAS, text);
@@ -3309,6 +3719,7 @@ if (typeof window !== "undefined") {
 
   els.vegasClearBtn.addEventListener("click", () => {
     state.vegasContext = null;
+    renderShowdownScriptControls();
     els.vegasText.value = "";
     els.vegasStatus.textContent = "Not loaded";
     els.vegasStatus.className = "vegas-status";
@@ -3345,6 +3756,7 @@ if (typeof window !== "undefined") {
       const json = await resp.json();
       const ctx = eng.parseOddsApiResponse(json);
       state.vegasContext = ctx;
+      renderShowdownScriptControls();
       els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded (live)`;
       els.vegasStatus.className = "vegas-status ok";
       els.vegasText.value = JSON.stringify(json);
@@ -3436,29 +3848,61 @@ if (typeof window !== "undefined") {
     setTimeout(() => {
       const players = state.players;
       const salaryCap = getSalaryCap();
+      state.generationPool = players;
+      state.buildInfo = null;
 
       if (state.contestType === "showdown") {
-        state.results.proj = eng.generateShowdownTopN(players, p => p.proj, 10, { attempts: 500, seed: 1, salaryCap });
+        const script = state.showdownScript;
+        const sdTeams = showdownTeams();
+        const structure = (sdTeams.length === 2 && (script.structures.size > 0 || script.majorityTeam))
+          ? { allowed: script.structures.size > 0 ? new Set(script.structures) : null, majorityTeam: script.majorityTeam }
+          : null;
+
+        // Game-script scenario: rebuild the pool's projections from simulated
+        // games that match the chosen winner / total (see engine notes).
+        let pool = players;
+        let scenarioInfo = null;
+        if (sdTeams.length === 2 && (script.winner || script.total)) {
+          try {
+            const lineVal = (script.line !== "" && script.line != null) ? parseFloat(script.line) : null;
+            const res = eng.buildShowdownScenarioPool(players, {
+              winner: script.winner, total: script.total,
+              line: (lineVal != null && !isNaN(lineVal)) ? lineVal : null,
+              vegasContext: state.vegasContext,
+            });
+            pool = res.players;
+            scenarioInfo = res.info;
+          } catch (err) {
+            setStatus("Scenario error: " + err.message);
+            els.generateBtn.disabled = false;
+            els.exportBtn.disabled = !state.results.proj;
+            return;
+          }
+        }
+        state.generationPool = pool;
+        state.buildInfo = { showdown: true, structure: describeStructure(structure), scenarioInfo };
+
+        state.results.proj = eng.generateShowdownTopN(pool, p => p.proj, 10, { attempts: 500, seed: 1, salaryCap, structure });
         setStatus("Generating Ceiling lineups...");
         setTimeout(() => {
-          state.results.ceil = eng.generateShowdownTopN(players, p => p.ceiling, 5, { attempts: 500, seed: 7, salaryCap });
+          state.results.ceil = eng.generateShowdownTopN(pool, p => p.ceiling, 5, { attempts: 500, seed: 7, salaryCap, structure });
           setStatus("Generating Small Field GPP lineups...");
           setTimeout(() => {
             const n = parseInt(els.sliderGppCount.value, 10);
             const smallOwn = parseInt(els.sliderSmallOwn.value, 10) / 100;
             const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
             const ceilingWeight = parseInt(els.sliderCeilingWeight.value, 10) / 100;
-            state.results.small = eng.generateShowdownCorrelated(players, n, {
+            state.results.small = eng.generateShowdownCorrelated(pool, n, {
               poolAttempts: 4000, seed: 11, ownershipField: "own", salaryCap, ceilingWeight,
-              ownershipWeight: smallOwn, maxExposureFraction: expFrac,
+              ownershipWeight: smallOwn, maxExposureFraction: expFrac, structure,
             }).map(r => ({ arr: r.arr, bringBack: false }));
             state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, maxExposureFraction: expFrac, ceilingWeight, showdown: true };
             setStatus("Generating Large Field GPP lineups...");
             setTimeout(() => {
               const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
-              state.results.large = eng.generateShowdownCorrelated(players, n, {
+              state.results.large = eng.generateShowdownCorrelated(pool, n, {
                 poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", salaryCap, ceilingWeight,
-                ownershipWeight: largeOwn, maxExposureFraction: expFrac,
+                ownershipWeight: largeOwn, maxExposureFraction: expFrac, structure,
               }).map(r => ({ arr: r.arr, bringBack: false }));
               state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, maxExposureFraction: expFrac, ceilingWeight, showdown: true };
               setStatus("Done.");
@@ -3484,8 +3928,8 @@ if (typeof window !== "undefined") {
           const bbShare = parseInt(els.sliderBringback.value, 10) / 100;
           const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
           const stackSize = parseInt(els.sliderStackSize.value, 10);
-          const secondaryStackSize = parseInt(els.sliderSecondaryStack.value, 10);
-          const tertiaryStackSize = parseInt(els.sliderTertiaryStack.value, 10);
+          const secondaryStackSize = stackSizeFromSlider(parseInt(els.sliderSecondaryStack.value, 10));
+          const tertiaryStackSize = stackSizeFromSlider(parseInt(els.sliderTertiaryStack.value, 10));
           const ceilingWeight = parseInt(els.sliderCeilingWeight.value, 10) / 100;
           state.results.small = eng.generateCorrelatedLineups(players, n, {
             poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, ceilingWeight,
@@ -3563,8 +4007,8 @@ if (typeof window !== "undefined") {
     ];
     if (!meta.showdown) {
       parts.push(`<b>Stack:</b> QB + ${meta.stackSize}`);
-      if (meta.secondaryStackSize > 0) parts.push(`<b>2nd game stack:</b> ${meta.secondaryStackSize} players`);
-      if (meta.tertiaryStackSize > 0) parts.push(`<b>3rd game stack:</b> ${meta.tertiaryStackSize} players`);
+      if (meta.secondaryStackSize > 0) parts.push(`<b>2nd game stack:</b> ${meta.secondaryStackSize} players, both teams`);
+      if (meta.tertiaryStackSize > 0) parts.push(`<b>3rd game stack:</b> ${meta.tertiaryStackSize} players, both teams`);
       parts.push(`<b>Bring-back rate:</b> ${Math.round(meta.bringBackShare * 100)}%`);
     } else {
       parts.push(`<b>Captain:</b> ×1.5 score &amp; salary`);
@@ -3619,18 +4063,25 @@ if (typeof window !== "undefined") {
       else if (stackCount === 1) badgesHtml += `<span class="badge stack">STACK</span>`;
       if (hasBB) badgesHtml += `<span class="badge bringback">BRING-BACK</span>`;
 
-      // Additional game stacks: any other team (not QB's team/opp) with 2+
-      // non-QB, non-DST players, sorted by size — labeled 2nd/3rd game stack.
-      const otherCounts = {};
+      // Additional game stacks: any OTHER game (not the QB's) where both
+      // teams have at least one RB/WR/TE in the lineup, ranked by size.
+      const qbGameKey = qb ? [qb.team, qbOpp].sort().join("-") : null;
+      const otherGames = new Map();
       arr.forEach(p => {
         if (p.position === "QB" || p.position === "DST") return;
-        if (p.team === qbTeam || p.team === qbOpp) return;
-        otherCounts[p.team] = (otherCounts[p.team] || 0) + 1;
+        const key = [p.team, eng.oppTeam(p)].sort().join("-");
+        if (key === qbGameKey) return;
+        if (!otherGames.has(key)) otherGames.set(key, {});
+        const g = otherGames.get(key);
+        g[p.team] = (g[p.team] || 0) + 1;
       });
-      const otherStacks = Object.entries(otherCounts).filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]);
-      otherStacks.forEach(([team, count], idx) => {
+      const otherStacks = [...otherGames.values()]
+        .filter(g => Object.keys(g).length >= 2)
+        .map(g => ({ total: Object.values(g).reduce((a, b) => a + b, 0), label: Object.entries(g).map(([t, c]) => `${t}×${c}`).join(" / ") }))
+        .sort((a, b) => b.total - a.total);
+      otherStacks.forEach((st, idx) => {
         const label = idx === 0 ? "2ND GAME" : "3RD GAME";
-        badgesHtml += `<span class="badge bringback">${label}: ${team} ×${count}</span>`;
+        badgesHtml += `<span class="badge bringback">${label}: ${st.label}</span>`;
       });
     }
 
@@ -3830,8 +4281,40 @@ if (typeof window !== "undefined") {
     } else if (activeTab === "simulate") {
       html = renderSimulateTab();
     }
+    if (["proj", "ceil", "small", "large"].includes(activeTab)) {
+      const res = state.results[activeTab];
+      if (res && res.length === 0) html = emptyResultNotice();
+      html = renderBuildInfoBanner() + html;
+    }
     els.content.innerHTML = html;
     if (activeTab === "simulate") wireSimulateTabControls();
+  }
+
+  function emptyResultNotice() {
+    const why = state.contestType === "showdown"
+      ? "Nothing under the salary cap fits the current roster structure. Loosen the structure or majority-team choice and generate again."
+      : "Nothing satisfied the current stack settings. Try a smaller stack or turn off the secondary/tertiary game stacks and generate again.";
+    return `<div class="empty-state"><div class="big">No lineups fit those settings</div>${why}</div>`;
+  }
+
+  function renderBuildInfoBanner() {
+    const b = state.buildInfo;
+    if (!b || !b.showdown) return "";
+    const parts = [];
+    if (b.structure) parts.push(`<span><b>Structure:</b> ${escapeHtml(b.structure)}</span>`);
+    const si = b.scenarioInfo;
+    if (si) {
+      const [tA, tB] = si.teams;
+      const bits = [];
+      if (si.winner) bits.push(`${escapeHtml(si.winner)} wins`);
+      if (si.total) bits.push(`${si.total === "over" ? "Over" : "Under"} ${si.line.toFixed(1)}`);
+      parts.push(`<span><b>Game script:</b> ${bits.join(" · ")}</span>`);
+      parts.push(`<span><b>Model expects:</b> ${escapeHtml(tA)} ${si.avgPoints[tA].toFixed(1)} – ${escapeHtml(tB)} ${si.avgPoints[tB].toFixed(1)} (total ${si.avgTotal.toFixed(1)})</span>`);
+      parts.push(`<span><b>Sample:</b> ${si.accepted.toLocaleString()} of ${si.attempts.toLocaleString()} simulated games matched (${(si.acceptanceRate * 100).toFixed(0)}%)</span>`);
+      parts.push(`<span style="white-space:normal;">Proj / Flr / Ceil in these lineups are <b>scenario-conditioned</b> — they answer "what if this game plays out that way," not your original projections. The Simulate tab is conditional on it too.</span>`);
+      if (si.lowSample) parts.push(`<span style="white-space:normal; color:var(--amber);">Rare scenario: only ${si.accepted.toLocaleString()} matching games, so the projection shifts are rougher than usual.</span>`);
+    }
+    return parts.length ? `<div class="metric-banner">${parts.join("")}</div>` : "";
   }
 
   function emptyState() {
@@ -4217,7 +4700,7 @@ if (typeof window !== "undefined") {
         setTimeout(() => {
           try {
             contestStatus.textContent = "Building synthetic field...";
-            const field = eng.buildSyntheticField(state.players, {
+            const field = eng.buildSyntheticField(state.generationPool || state.players, {
               totalEntries: c.totalEntries, fieldSampleSize, seed: 1, sharpShare,
               ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
             });
@@ -4363,6 +4846,7 @@ if (typeof window !== "undefined") {
         const trimmed = savedVegas.trim();
         const ctx = trimmed.startsWith("[") ? eng.parseOddsApiResponse(trimmed) : eng.parseVegasLines(savedVegas);
         state.vegasContext = ctx;
+        renderShowdownScriptControls();
         els.vegasText.value = savedVegas;
         els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded (restored)`;
         els.vegasStatus.className = "vegas-status ok";

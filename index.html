@@ -2897,6 +2897,15 @@ function buildShowdownScenarioPool(players, opts = {}) {
     winner = null, total = null, line = null, vegasContext = null,
     targetAccepted = 3000, maxAttempts = 150000, seed = 101,
     teamWeight = 0.35, gameWeight = 0.15, force = false,
+    // Conditioning on a winner correlates EVERY player on that team at once
+    // (including their own defense, which loads positively on its own
+    // team's shock) — with no player-level tension pulling the other way,
+    // the "optimal" build collapses hard toward one team. scenarioStrength
+    // dampens the applied shift's magnitude without changing its direction
+    // or the model's win-probability calibration (a separate, already-
+    // verified part of the pipeline) — it only tones down how far each
+    // player's projection moves once conditioned.
+    scenarioStrength = 0.6,
   } = opts;
 
   if (!winner && !total && !force) return { players, info: null };
@@ -2986,10 +2995,11 @@ function buildShowdownScenarioPool(players, opts = {}) {
   const outPlayers = players.map((p, j) => {
     const c = stats(scores[j], accepted);
     const b = stats(baseScores[j], baseN);
-    const proj = Math.max(0, p.proj + (c.mean - b.mean));
-    const ceiling = Math.max(proj, p.ceiling + (c.p85 - b.p85));
+    const k = scenarioStrength;
+    const proj = Math.max(0, p.proj + k * (c.mean - b.mean));
+    const ceiling = Math.max(proj, p.ceiling + k * (c.p85 - b.p85));
     const hasFloor = p.floor != null && !isNaN(p.floor);
-    const floor = hasFloor ? Math.min(proj, Math.max(0, p.floor + (c.p15 - b.p15))) : p.floor;
+    const floor = hasFloor ? Math.min(proj, Math.max(0, p.floor + k * (c.p15 - b.p15))) : p.floor;
     return { ...p, baseProj: p.proj, baseCeiling: p.ceiling, baseFloor: p.floor, proj, ceiling, floor };
   });
 
@@ -3142,7 +3152,7 @@ if (typeof window !== "undefined") {
     simResults: null,
     simSort: { key: "median", dir: "desc" },
     // Showdown build controls: roster split (5-1 / 4-2 / 3-3) and game script
-    showdownScript: { configs: new Set(), winner: null, total: null, line: "" },
+    showdownScript: { configs: new Set(), winner: null, total: null, line: "", strength: 0.6 },
     generationPool: null, // the player pool the current lineups were actually built from
     buildInfo: null,      // what to show in the banner above showdown lineups
     simMode: "distribution", // "distribution" | "contest"
@@ -3343,11 +3353,16 @@ if (typeof window !== "undefined") {
       <input type="number" id="sdLine" step="0.5" placeholder="Line (defaults to the Vegas total)" value="${escapeHtml(String(sc.line || ""))}"
         style="width:100%; margin-top:8px; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">` : "";
 
+    const strengthSlider = (sc.winner || sc.total) ? `
+      <div class="slider-label" style="margin:10px 0 6px;"><b>Scenario strength</b><span class="val" id="valSdStrength">${Math.round(sc.strength * 100)}%</span></div>
+      <input type="range" id="sliderSdStrength" min="10" max="100" step="5" value="${Math.round(sc.strength * 100)}">
+      <div class="slider-note">How hard a picked winner/total shifts every player's projection. Conditioning on a winner moves every one of that team's players at once — including their own defense — with nothing pulling back the other way, so the full-strength shift tends to push lineups toward stacking one team almost automatically. Lower this if that feels too one-sided; there's no proven "correct" value here.</div>` : "";
+
     body.innerHTML =
       row("Roster structure — pick which team is stacked", structChips,
         "Pick one or more, each paired with a team. \"5-1 CIN\" and \"4-2 TB\" can both be on at once — a lineup matching either is allowed. \"Any split\" leaves it open. 6-0 is never legal — DraftKings needs at least one player from each team.") +
       row("Game script: who wins", winnerChips, "") +
-      row("Game script: total", totalChips, "") + lineInput +
+      row("Game script: total", totalChips, "") + lineInput + strengthSlider +
       `<div class="slider-note" style="margin-top:10px;">${baseline} Picking a winner and/or total re-derives every player's projection, ceiling and floor from simulated games that match — so lineups are built for that world, not the average one.</div>`;
   }
 
@@ -3370,6 +3385,11 @@ if (typeof window !== "undefined") {
 
   els.showdownScriptBody.addEventListener("input", (e) => {
     if (e.target && e.target.id === "sdLine") state.showdownScript.line = e.target.value;
+    if (e.target && e.target.id === "sliderSdStrength") {
+      state.showdownScript.strength = parseInt(e.target.value, 10) / 100;
+      const label = document.getElementById("valSdStrength");
+      if (label) label.textContent = e.target.value + "%";
+    }
   });
 
   els.platformDK.addEventListener("click", () => setPlatform("dk"));
@@ -3863,6 +3883,7 @@ if (typeof window !== "undefined") {
               winner: script.winner, total: script.total,
               line: (lineVal != null && !isNaN(lineVal)) ? lineVal : null,
               vegasContext: state.vegasContext,
+              scenarioStrength: script.strength,
             });
             pool = res.players;
             scenarioInfo = res.info;

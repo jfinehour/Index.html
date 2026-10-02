@@ -771,6 +771,18 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
       </div>
 
       <div class="slider-group">
+        <div class="slider-label"><b>Minimum projection (GPP only)</b><span class="val" id="valMinProj">1.0 pts</span></div>
+        <input type="range" id="sliderMinProj" min="0" max="8" value="1" step="0.5">
+        <div class="slider-note">Excludes players below this projection from Small/Large Field lineups entirely. A near-zero-ceiling player never scores well enough to be genuinely preferred, but the builder can still use one as a last-resort salary-dump when nothing else fits — this stops that. Projection and Ceiling tabs are unaffected; set to 0 to disable.</div>
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label"><b>Minimum salary used (GPP only)</b><span class="val" id="valMinSalary">70% ($35,000)</span></div>
+        <input type="range" id="sliderMinSalary" min="0" max="99" value="70" step="1">
+        <div class="slider-note">Requires Small/Large Field lineups to spend at least this share of the salary cap, so leverage-driven picks don't leave excessive cap space unused. In Showdown, the true achievable maximum is often well below 100% of the cap — just the two teams' depth charts, not a full slate — so pushing this too high can return zero lineups; the default leaves real headroom. Projection and Ceiling are unaffected; set to 0 to disable.</div>
+      </div>
+
+      <div class="slider-group">
         <div class="slider-label"><b>Small Field ownership fade</b><span class="val" id="valSmallOwn">20%</span></div>
         <input type="range" id="sliderSmallOwn" min="0" max="100" value="20">
         <div class="slider-note">Higher = discounts high-owned Small Field chalk more when scoring ceiling leverage.</div>
@@ -1247,7 +1259,7 @@ function buildOneLineup(pool, opts) {
   const { scoreFn, rng, noise = 0.15, requireStack = false, requireBringBack = false,
           exposure = new Map(), maxExposure = null, topK = 5,
           flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1,
-          vegasContext = null, salaryCap = SALARY_CAP,
+          vegasContext = null, salaryCap = SALARY_CAP, minSalary = 0,
           secondaryStackSize = 0, tertiaryStackSize = 0 } = opts;
 
   const byPos = { QB: [], RB: [], WR: [], TE: [], DST: [] };
@@ -1461,16 +1473,19 @@ function buildOneLineup(pool, opts) {
 
   const arr = lineupArray(slots);
   if (arr.length !== 9) return null;
-  if (lineupSalary(arr) > salaryCap) return null;
+  const finalSalary = lineupSalary(arr);
+  if (finalSalary > salaryCap) return null;
+  if (finalSalary < minSalary) return null;
   return { slots, arr };
 }
 
 /** Hill-climb: try single-player swaps that improve scoreFn total while keeping
- * salary <= cap and (if required) stack/bring-back constraints intact. */
+ * salary <= cap, salary >= minSalary (if set), and (if required) stack/bring-back
+ * constraints intact. */
 function improveLineup(lineup, pool, scoreFn, opts = {}) {
   const { requireStack = false, requireBringBack = false, iterations = 60,
           flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1,
-          salaryCap = SALARY_CAP, secondaryStackSize = 0, tertiaryStackSize = 0 } = opts;
+          salaryCap = SALARY_CAP, minSalary = 0, secondaryStackSize = 0, tertiaryStackSize = 0 } = opts;
   let { slots, arr } = lineup;
   const usedIds = new Set(arr.map(p => p.id));
 
@@ -1544,7 +1559,8 @@ function improveLineup(lineup, pool, scoreFn, opts = {}) {
         const newStackOk = !requireStack || hasStackArr(newArr);
         const newBBOk = !requireBringBack || hasBringBackArr(newArr);
         const newAdditionalOk = hasAdditionalStacksArr(newArr);
-        if (lineupSalary(newArr) <= salaryCap && newStackOk && newBBOk && newAdditionalOk) {
+        const newSalary = lineupSalary(newArr);
+        if (newSalary <= salaryCap && newSalary >= minSalary && newStackOk && newBBOk && newAdditionalOk) {
           usedIds.delete(p.id); usedIds.add(best.id);
           arr = newArr;
           improved = true;
@@ -1842,7 +1858,7 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, bringBackShare = 0.5,
           maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
           flexEligible = FLEX_ELIGIBLE, stackTeams = null, stackSize = 1,
-          vegasContext = null, salaryCap = SALARY_CAP, ceilingWeight = 1.0,
+          vegasContext = null, salaryCap = SALARY_CAP, minSalary = 0, ceilingWeight = 1.0,
           secondaryStackSize = 0, tertiaryStackSize = 0 } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
@@ -1861,12 +1877,12 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   for (let i = 0; i < poolAttempts; i++) {
     const wantBringBack = rng() < bringBackShare;
     const built = buildOneLineup(players, {
-      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize, vegasContext, salaryCap,
+      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize, vegasContext, salaryCap, minSalary,
       requireStack: true, requireBringBack: wantBringBack, secondaryStackSize, tertiaryStackSize,
     });
     if (!built) continue;
     const improved = improveLineup(built, players, leverageScore, {
-      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize, salaryCap,
+      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize, salaryCap, minSalary,
       secondaryStackSize, tertiaryStackSize,
     });
     const sig = signature(improved.arr);
@@ -2089,7 +2105,7 @@ function solveExactShowdownOptimal(players, scoreFn, opts = {}) {
  * (e.g. 4-2 with DET as the 4), a target split is drawn first and each
  * team's head count is enforced slot by slot. */
 function buildShowdownLineup(pool, opts) {
-  const { scoreFn, rng, noise = 0.15, topK = 5, salaryCap = 50000,
+  const { scoreFn, rng, noise = 0.15, topK = 5, salaryCap = 50000, minSalary = 0,
           exposure = new Map(), maxExposure = null, structure = null } = opts;
   const teams = [...new Set(pool.map(p => p.team))];
   const used = new Set();
@@ -2148,7 +2164,9 @@ function buildShowdownLineup(pool, opts) {
   }
 
   const arr = [{ ...cpt, isCaptain: true }, ...flex.map(p => ({ ...p, isCaptain: false }))];
-  if (showdownSalary(arr) > salaryCap) return null;
+  const finalSalary = showdownSalary(arr);
+  if (finalSalary > salaryCap) return null;
+  if (finalSalary < minSalary) return null;
   if (!showdownStructureOk(arr, structure, teams)) return null;
   return arr;
 }
@@ -2243,7 +2261,7 @@ function showdownOverlapCount(a, b) {
  * ownership-fade leverage score, plus exposure/overlap diversity. */
 function generateShowdownCorrelated(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, ownershipField = "own",
-          maxExposureFraction = 0.4, maxOverlap = 4, salaryCap = 50000, ceilingWeight = 1.0,
+          maxExposureFraction = 0.4, maxOverlap = 4, salaryCap = 50000, minSalary = 0, ceilingWeight = 1.0,
           structure = null } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
@@ -2258,7 +2276,7 @@ function generateShowdownCorrelated(players, n, opts = {}) {
   const candidates = [];
   const seenSigs = new Set();
   for (let i = 0; i < poolAttempts; i++) {
-    const built = buildShowdownLineup(players, { scoreFn: leverageScore, rng, noise: 0.30, topK: 14, salaryCap, structure });
+    const built = buildShowdownLineup(players, { scoreFn: leverageScore, rng, noise: 0.30, topK: 14, salaryCap, minSalary, structure });
     if (!built) continue;
     const sig = showdownSignature(built);
     if (seenSigs.has(sig)) continue;
@@ -3176,6 +3194,10 @@ if (typeof window !== "undefined") {
     exportBtn: document.getElementById("exportBtn"),
     sliderSmallOwn: document.getElementById("sliderSmallOwn"),
     sliderCeilingWeight: document.getElementById("sliderCeilingWeight"),
+    sliderMinProj: document.getElementById("sliderMinProj"),
+    valMinProj: document.getElementById("valMinProj"),
+    sliderMinSalary: document.getElementById("sliderMinSalary"),
+    valMinSalary: document.getElementById("valMinSalary"),
     sliderLargeOwn: document.getElementById("sliderLargeOwn"),
     sliderBringback: document.getElementById("sliderBringback"),
     sliderStackSize: document.getElementById("sliderStackSize"),
@@ -3249,6 +3271,7 @@ if (typeof window !== "undefined") {
     els.platformDK.classList.toggle("selected", p === "dk");
     els.platformFD.classList.toggle("selected", p === "fd");
     try { localStorage.setItem(STORAGE_KEY_PLATFORM, p); } catch (e) { /* ignore */ }
+    if (typeof updateMinSalaryLabel === "function") updateMinSalaryLabel(); // $ equivalent depends on the cap
   }
 
   function setContestType(c) {
@@ -3412,6 +3435,17 @@ if (typeof window !== "undefined") {
     const cw = parseInt(els.sliderCeilingWeight.value, 10);
     els.valCeilingWeight.textContent = cw === 100 ? "100% Ceiling" : `${cw}% Ceil / ${100 - cw}% Proj`;
   });
+  els.sliderMinProj.addEventListener("input", () => {
+    const mp = parseFloat(els.sliderMinProj.value);
+    els.valMinProj.textContent = mp === 0 ? "Off" : mp.toFixed(1) + " pts";
+  });
+  function updateMinSalaryLabel() {
+    const pct = parseInt(els.sliderMinSalary.value, 10);
+    if (pct === 0) { els.valMinSalary.textContent = "Off"; return; }
+    const dollars = Math.round((pct / 100) * getSalaryCap());
+    els.valMinSalary.textContent = `${pct}% ($${dollars.toLocaleString()})`;
+  }
+  els.sliderMinSalary.addEventListener("input", updateMinSalaryLabel);
   bindSlider(els.sliderLargeOwn, els.valLargeOwn, "%");
   bindSlider(els.sliderBringback, els.valBringback, "%");
   els.sliderStackSize.addEventListener("input", () => {
@@ -3911,19 +3945,27 @@ if (typeof window !== "undefined") {
             const smallOwn = parseInt(els.sliderSmallOwn.value, 10) / 100;
             const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
             const ceilingWeight = parseInt(els.sliderCeilingWeight.value, 10) / 100;
-            state.results.small = eng.generateShowdownCorrelated(pool, n, {
-              poolAttempts: 4000, seed: 11, ownershipField: "own", salaryCap, ceilingWeight,
+            // GPP-only floor: a near-zero-ceiling player can't score well enough
+            // to be genuinely preferred, but the builder will still use one as a
+            // last-resort salary-dump if nothing else fits a required slot —
+            // excluding them outright (Projection/Ceiling untouched) stops that.
+            const minProj = parseFloat(els.sliderMinProj.value);
+            const gppPool = pool.filter(p => p.proj >= minProj);
+            const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
+            const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
+            state.results.small = eng.generateShowdownCorrelated(gppPool, n, {
+              poolAttempts: 4000, seed: 11, ownershipField: "own", salaryCap, minSalary, ceilingWeight,
               ownershipWeight: smallOwn, maxExposureFraction: expFrac, structure,
             }).map(r => ({ arr: r.arr, bringBack: false }));
-            state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, maxExposureFraction: expFrac, ceilingWeight, showdown: true };
+            state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, maxExposureFraction: expFrac, ceilingWeight, minProj, minSalary, salaryCap, showdown: true };
             setStatus("Generating Large Field GPP lineups...");
             setTimeout(() => {
               const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
-              state.results.large = eng.generateShowdownCorrelated(pool, n, {
-                poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", salaryCap, ceilingWeight,
+              state.results.large = eng.generateShowdownCorrelated(gppPool, n, {
+                poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", salaryCap, minSalary, ceilingWeight,
                 ownershipWeight: largeOwn, maxExposureFraction: expFrac, structure,
               }).map(r => ({ arr: r.arr, bringBack: false }));
-              state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, maxExposureFraction: expFrac, ceilingWeight, showdown: true };
+              state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, maxExposureFraction: expFrac, ceilingWeight, minProj, minSalary, salaryCap, showdown: true };
               setStatus("Done.");
               els.generateBtn.disabled = false;
               els.exportBtn.disabled = false;
@@ -3950,21 +3992,27 @@ if (typeof window !== "undefined") {
           const secondaryStackSize = stackSizeFromSlider(parseInt(els.sliderSecondaryStack.value, 10));
           const tertiaryStackSize = stackSizeFromSlider(parseInt(els.sliderTertiaryStack.value, 10));
           const ceilingWeight = parseInt(els.sliderCeilingWeight.value, 10) / 100;
-          state.results.small = eng.generateCorrelatedLineups(players, n, {
-            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, ceilingWeight,
+          // GPP-only floor — see the matching comment in the Showdown branch
+          // above. Projection/Ceiling (generateTopN, just above) are untouched.
+          const minProj = parseFloat(els.sliderMinProj.value);
+          const gppPlayers = players.filter(p => p.proj >= minProj);
+          const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
+          const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
+          state.results.small = eng.generateCorrelatedLineups(gppPlayers, n, {
+            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, minSalary, ceilingWeight,
             ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
             stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
           });
-          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, showdown: false };
+          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, showdown: false };
           setStatus("Generating Large Field GPP lineups...");
           setTimeout(() => {
             const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
-            state.results.large = eng.generateCorrelatedLineups(players, n, {
-              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, ceilingWeight,
+            state.results.large = eng.generateCorrelatedLineups(gppPlayers, n, {
+              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, minSalary, ceilingWeight,
               ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
               stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
             });
-            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, showdown: false };
+            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, showdown: false };
             setStatus("Done.");
             els.generateBtn.disabled = false;
             els.exportBtn.disabled = false;
@@ -4033,6 +4081,11 @@ if (typeof window !== "undefined") {
       parts.push(`<b>Captain:</b> ×1.5 score &amp; salary`);
     }
     parts.push(`<b>Max exposure:</b> ${Math.round(meta.maxExposureFraction * 100)}% per player`);
+    if (meta.minProj > 0) parts.push(`<b>Min projection:</b> ${meta.minProj.toFixed(1)} pts (players below this excluded)`);
+    if (meta.minSalary > 0) {
+      const pct = meta.salaryCap ? Math.round((meta.minSalary / meta.salaryCap) * 100) : null;
+      parts.push(`<b>Min salary used:</b> $${meta.minSalary.toLocaleString()}${pct != null ? ` (${pct}% of cap)` : ""}`);
+    }
     return `<div class="metric-banner">${parts.map(p => `<span>${p}</span>`).join("")}</div>`;
   }
 
@@ -4310,16 +4363,25 @@ if (typeof window !== "undefined") {
   }
 
   function emptyResultNotice(tab) {
+    const isGpp = tab === "small" || tab === "large";
+    const isShowdown = state.contestType === "showdown";
+    let hint = "";
+    if (isGpp) {
+      hint = " If you've raised Minimum projection, that may have excluded too many players at a required position — try lowering it.";
+      hint += isShowdown
+        ? " If you've raised Minimum salary used, note Showdown's achievable maximum is often well below 100% of the cap (just two teams' depth charts) — try lowering it."
+        : " If you've raised Minimum salary used, try lowering it too.";
+    }
     let why;
-    if (state.contestType === "showdown") {
+    if (isShowdown) {
       // Structure only constrains Small/Large — an empty Projection/Ceiling
       // tab in Showdown can only be a salary/roster-legality issue, not a
       // structure conflict.
-      why = (tab === "small" || tab === "large")
-        ? "Nothing under the salary cap fits the current roster structure. Loosen the structure or majority-team choice and generate again."
+      why = isGpp
+        ? "Nothing under the salary cap fits the current roster structure." + hint + " Loosen the structure or majority-team choice and generate again."
         : "Nothing under the salary cap forms a legal 6-player roster with both teams represented. Check your player pool and salary cap.";
     } else {
-      why = "Nothing satisfied the current stack settings. Try a smaller stack or turn off the secondary/tertiary game stacks and generate again.";
+      why = "Nothing satisfied the current stack settings." + hint + " Try a smaller stack or turn off the secondary/tertiary game stacks and generate again.";
     }
     return `<div class="empty-state"><div class="big">No lineups fit those settings</div>${why}</div>`;
   }

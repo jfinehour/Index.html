@@ -423,6 +423,55 @@ input[type="range"]::-moz-range-thumb {
   margin-left: 4px;
 }
 
+/* ---------- Player boosts ---------- */
+.boost-search-results {
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-panel-raised);
+}
+.boost-search-result {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.boost-search-result:last-child { border-bottom: none; }
+.boost-search-result:active { background: var(--line-soft); }
+.boost-search-result .meta { color: var(--text-faint); font-size: 11px; }
+.boost-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-panel-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+}
+.boost-row .boost-name { flex: 1; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.boost-row input[type="range"] { flex: 0 0 90px; }
+.boost-row .boost-pct { flex: 0 0 auto; font-size: 12px; font-weight: 700; color: var(--amber); width: 38px; text-align: right; }
+.boost-row .boost-remove {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
 /* ---------- Tabs ---------- */
 .tabbar {
   display: flex;
@@ -876,6 +925,15 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
         </div>
         <div class="slider-note" style="margin-bottom:10px;">Restricts the QB (and stack) in Small Field &amp; Large Field lineups to the selected team(s). Leave none selected to allow any team.</div>
         <div class="team-chip-grid" id="teamChipGrid"></div>
+      </div>
+
+      <div class="slider-group" id="playerBoostGroup" style="display:none;">
+        <div class="slider-label" style="margin-bottom:6px;"><b>Player boosts (GPP only)</b></div>
+        <div class="slider-note" style="margin-bottom:8px;">Nudges a player's Small/Large Field selection likelihood without changing their real numbers — Projection, Ceiling, Simulate, and Contest ROI all keep using the accurate Proj/Ceiling/Floor everywhere.</div>
+        <input type="text" id="boostSearchInput" placeholder="Search players to boost..." autocomplete="off"
+          style="width:100%; background:var(--bg-panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 10px; font-size:12.5px;">
+        <div id="boostSearchResults"></div>
+        <div id="boostCurrentList" style="margin-top:10px;"></div>
       </div>
 
     </div>
@@ -1859,16 +1917,21 @@ function generateCorrelatedLineups(players, n, opts = {}) {
           maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
           flexEligible = FLEX_ELIGIBLE, stackTeams = null, stackSize = 1,
           vegasContext = null, salaryCap = SALARY_CAP, minSalary = 0, ceilingWeight = 1.0,
-          secondaryStackSize = 0, tertiaryStackSize = 0 } = opts;
+          secondaryStackSize = 0, tertiaryStackSize = 0, boosts = null } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
   const qbTeamFilter = (stackTeams && stackTeams.length > 0) ? new Set(stackTeams) : null;
 
+  // A boost nudges GPP selection likelihood only — it's a multiplier on the
+  // leverage score used to pick players, not a change to the player's real
+  // Proj/Ceiling/Floor. Those stay accurate everywhere else (Projection,
+  // Ceiling, Simulate, Contest ROI all read the real numbers untouched).
   const leverageScore = (p) => {
     const ownRaw = p[ownershipField];
     const own = isNaN(ownRaw) ? 0 : ownRaw;
     const blended = ceilingWeight * p.ceiling + (1 - ceilingWeight) * p.proj;
-    return blended * (1 - (ownershipWeight * own) / 100);
+    const boost = boosts ? (boosts.get(p.name) || 0) : 0;
+    return blended * (1 - (ownershipWeight * own) / 100) * (1 + boost);
   };
 
   // Phase 1: generate a large pool of valid, stack-satisfying candidates
@@ -2262,15 +2325,18 @@ function showdownOverlapCount(a, b) {
 function generateShowdownCorrelated(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, ownershipField = "own",
           maxExposureFraction = 0.4, maxOverlap = 4, salaryCap = 50000, minSalary = 0, ceilingWeight = 1.0,
-          structure = null } = opts;
+          structure = null, boosts = null } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
 
+  // See the matching comment in generateCorrelatedLineups — boosts only
+  // nudge GPP selection, never the real Proj/Ceiling/Floor values.
   const leverageScore = (p) => {
     const ownRaw = p[ownershipField];
     const own = isNaN(ownRaw) ? 0 : ownRaw;
     const blended = ceilingWeight * p.ceiling + (1 - ceilingWeight) * p.proj;
-    return blended * (1 - (ownershipWeight * own) / 100);
+    const boost = boosts ? (boosts.get(p.name) || 0) : 0;
+    return blended * (1 - (ownershipWeight * own) / 100) * (1 + boost);
   };
 
   const candidates = [];
@@ -3177,6 +3243,7 @@ if (typeof window !== "undefined") {
     contestPresets: makeSeededContestPresets(),
     activeContestPresetId: "preset_large_single",
     contestFormMode: "view", // "view" | "add" | "edit"
+    playerBoosts: new Map(), // name -> boost fraction (e.g. 0.05 = +5%), GPP selection only
     contestResults: null,
     contestSort: { key: "roiPct", dir: "desc" },
     selectedTeams: new Set(),
@@ -3207,6 +3274,10 @@ if (typeof window !== "undefined") {
     sliderGppCount: document.getElementById("sliderGppCount"),
     toggleTEFlex: document.getElementById("toggleTEFlex"),
     teamPickerGroup: document.getElementById("teamPickerGroup"),
+    playerBoostGroup: document.getElementById("playerBoostGroup"),
+    boostSearchInput: document.getElementById("boostSearchInput"),
+    boostSearchResults: document.getElementById("boostSearchResults"),
+    boostCurrentList: document.getElementById("boostCurrentList"),
     teamChipGrid: document.getElementById("teamChipGrid"),
     teamPickerCount: document.getElementById("teamPickerCount"),
     teamPickerClear: document.getElementById("teamPickerClear"),
@@ -3636,12 +3707,14 @@ if (typeof window !== "undefined") {
     if (loaded.length === 0) {
       state.players = null;
       state.selectedTeams = new Set();
+      state.playerBoosts.clear();
       els.fileStatus.textContent = "No projections active yet";
       els.fileStatus.className = "file-status";
       els.generateBtn.disabled = true;
       els.teamChipGrid.innerHTML = "";
       els.teamPickerGroup.style.display = "none";
       updateTeamPickerCount();
+      els.playerBoostGroup.style.display = "none";
       renderShowdownScriptControls();
       return;
     }
@@ -3660,10 +3733,12 @@ if (typeof window !== "undefined") {
 
     state.players = players;
     state.selectedTeams = new Set();
+    state.playerBoosts.clear(); // names are tied to this specific pool — don't carry over to a new one
     els.fileStatus.textContent = `${players.length} players active — ${label}`;
     els.fileStatus.className = "file-status ok";
     els.generateBtn.disabled = false;
     populateTeamChips(players);
+    renderPlayerBoosts();
     renderShowdownScriptControls();
   }
 
@@ -3708,6 +3783,7 @@ if (typeof window !== "undefined") {
     state.generationPool = null;
     state.buildInfo = null;
     state.selectedTeams = new Set();
+    state.playerBoosts.clear();
     state.vegasContext = null;
     renderShowdownScriptControls();
     safeStorageRemove(STORAGE_KEY_VEGAS);
@@ -3728,6 +3804,10 @@ if (typeof window !== "undefined") {
     els.teamChipGrid.innerHTML = "";
     els.teamPickerGroup.style.display = "none";
     updateTeamPickerCount();
+    els.boostSearchInput.value = "";
+    els.playerBoostGroup.style.display = "none";
+    els.boostSearchResults.innerHTML = "";
+    els.boostCurrentList.innerHTML = "";
 
     updateTabCounts();
     setStatus("");
@@ -3871,6 +3951,76 @@ if (typeof window !== "undefined") {
     updateTeamPickerCount();
   });
 
+  /* ---------------- Player boosts (GPP selection only, not real stats) ---------------- */
+  function renderPlayerBoosts() {
+    const hasPlayers = state.players && state.players.length > 0;
+    els.playerBoostGroup.style.display = hasPlayers ? "block" : "none";
+    if (!hasPlayers) return;
+    renderBoostSearchResults();
+    renderBoostCurrentList();
+  }
+
+  function renderBoostSearchResults() {
+    const q = els.boostSearchInput.value.trim().toLowerCase();
+    if (!q) { els.boostSearchResults.innerHTML = ""; return; }
+    const matches = state.players
+      .filter(p => p.name.toLowerCase().includes(q) && !state.playerBoosts.has(p.name))
+      .slice(0, 8);
+    if (matches.length === 0) {
+      els.boostSearchResults.innerHTML = `<div class="boost-search-results"><div class="boost-search-result" style="cursor:default;">No matching players</div></div>`;
+      return;
+    }
+    els.boostSearchResults.innerHTML = `<div class="boost-search-results">${matches.map(p =>
+      `<button type="button" class="boost-search-result" data-boost-add="${escapeHtml(p.name)}">
+         <span>${escapeHtml(p.name)} <span class="meta">${escapeHtml(p.position)} · ${escapeHtml(p.team)}</span></span>
+         <span class="meta">+ Add</span>
+       </button>`
+    ).join("")}</div>`;
+  }
+
+  function renderBoostCurrentList() {
+    if (state.playerBoosts.size === 0) {
+      els.boostCurrentList.innerHTML = `<div class="slider-note">No boosted players yet — search above to add one.</div>`;
+      return;
+    }
+    els.boostCurrentList.innerHTML = [...state.playerBoosts.entries()].map(([name, frac]) => {
+      const pct = Math.round(frac * 100);
+      return `<div class="boost-row">
+        <span class="boost-name">${escapeHtml(name)}</span>
+        <input type="range" min="0" max="30" step="1" value="${pct}" data-boost-slider="${escapeHtml(name)}">
+        <span class="boost-pct">+${pct}%</span>
+        <button type="button" class="boost-remove" data-boost-remove="${escapeHtml(name)}">×</button>
+      </div>`;
+    }).join("");
+  }
+
+  els.boostSearchInput.addEventListener("input", renderBoostSearchResults);
+
+  els.boostSearchResults.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-boost-add]");
+    if (!btn) return;
+    state.playerBoosts.set(btn.dataset.boostAdd, 0.05); // default: a genuinely slight nudge, per testing
+    els.boostSearchInput.value = "";
+    renderBoostSearchResults();
+    renderBoostCurrentList();
+  });
+
+  els.boostCurrentList.addEventListener("input", (e) => {
+    const slider = e.target.closest("[data-boost-slider]");
+    if (!slider) return;
+    const pct = parseInt(slider.value, 10);
+    state.playerBoosts.set(slider.dataset.boostSlider, pct / 100);
+    slider.closest(".boost-row").querySelector(".boost-pct").textContent = `+${pct}%`;
+  });
+
+  els.boostCurrentList.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-boost-remove]");
+    if (!btn) return;
+    state.playerBoosts.delete(btn.dataset.boostRemove);
+    renderBoostCurrentList();
+    renderBoostSearchResults(); // the removed player can now reappear in search
+  });
+
   /* ---------------- Tabs ---------------- */
   els.tabbar.addEventListener("click", (e) => {
     const btn = e.target.closest(".tab");
@@ -3954,18 +4104,18 @@ if (typeof window !== "undefined") {
             const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
             const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
             state.results.small = eng.generateShowdownCorrelated(gppPool, n, {
-              poolAttempts: 4000, seed: 11, ownershipField: "own", salaryCap, minSalary, ceilingWeight,
+              poolAttempts: 4000, seed: 11, ownershipField: "own", salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts,
               ownershipWeight: smallOwn, maxExposureFraction: expFrac, structure,
             }).map(r => ({ arr: r.arr, bringBack: false }));
-            state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, maxExposureFraction: expFrac, ceilingWeight, minProj, minSalary, salaryCap, showdown: true };
+            state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, maxExposureFraction: expFrac, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, showdown: true };
             setStatus("Generating Large Field GPP lineups...");
             setTimeout(() => {
               const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
               state.results.large = eng.generateShowdownCorrelated(gppPool, n, {
-                poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", salaryCap, minSalary, ceilingWeight,
+                poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts,
                 ownershipWeight: largeOwn, maxExposureFraction: expFrac, structure,
               }).map(r => ({ arr: r.arr, bringBack: false }));
-              state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, maxExposureFraction: expFrac, ceilingWeight, minProj, minSalary, salaryCap, showdown: true };
+              state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, maxExposureFraction: expFrac, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, showdown: true };
               setStatus("Done.");
               els.generateBtn.disabled = false;
               els.exportBtn.disabled = false;
@@ -3999,20 +4149,20 @@ if (typeof window !== "undefined") {
           const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
           const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
           state.results.small = eng.generateCorrelatedLineups(gppPlayers, n, {
-            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, minSalary, ceilingWeight,
+            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts,
             ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
             stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
           });
-          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, showdown: false };
+          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, showdown: false };
           setStatus("Generating Large Field GPP lineups...");
           setTimeout(() => {
             const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
             state.results.large = eng.generateCorrelatedLineups(gppPlayers, n, {
-              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, minSalary, ceilingWeight,
+              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts,
               ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
               stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
             });
-            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, showdown: false };
+            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, showdown: false };
             setStatus("Done.");
             els.generateBtn.disabled = false;
             els.exportBtn.disabled = false;
@@ -4085,6 +4235,10 @@ if (typeof window !== "undefined") {
     if (meta.minSalary > 0) {
       const pct = meta.salaryCap ? Math.round((meta.minSalary / meta.salaryCap) * 100) : null;
       parts.push(`<b>Min salary used:</b> $${meta.minSalary.toLocaleString()}${pct != null ? ` (${pct}% of cap)` : ""}`);
+    }
+    if (meta.boosts && meta.boosts.size > 0) {
+      const list = [...meta.boosts.entries()].map(([name, f]) => `${escapeHtml(name)} +${Math.round(f * 100)}%`).join(", ");
+      parts.push(`<b>Player boosts:</b> ${list} (GPP selection only — real Proj/Ceiling unchanged)`);
     }
     return `<div class="metric-banner">${parts.map(p => `<span>${p}</span>`).join("")}</div>`;
   }

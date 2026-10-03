@@ -831,6 +831,12 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
         <div class="slider-note">Requires Small/Large Field lineups to spend at least this share of the salary cap, so leverage-driven picks don't leave excessive cap space unused. In Showdown, the true achievable maximum is often well below 100% of the cap — just the two teams' depth charts, not a full slate — so pushing this too high can return zero lineups; the default leaves real headroom. Projection and Ceiling are unaffected; set to 0 to disable.</div>
       </div>
 
+      <div class="slider-group" id="maxPerTeamGroup">
+        <div class="slider-label"><b>Max players from one team (Classic GPP only)</b><span class="val" id="valMaxPerTeam">Off</span></div>
+        <input type="range" id="sliderMaxPerTeam" min="0" max="9" value="0" step="1">
+        <div class="slider-note">Caps how many total players (including the QB) can come from a single team in Small/Large Field lineups. Set below Stack size + 1 and it'll conflict with your own stack requirement, producing zero lineups — the stack is checked first. Doesn't apply to Showdown, where Roster Structure already controls the per-team split directly. Set to 0 to disable.</div>
+      </div>
+
       <div class="slider-group">
         <div class="slider-label"><b>Small Field ownership fade</b><span class="val" id="valSmallOwn">20%</span></div>
         <input type="range" id="sliderSmallOwn" min="0" max="100" value="20">
@@ -1318,13 +1324,14 @@ function buildOneLineup(pool, opts) {
           exposure = new Map(), maxExposure = null, topK = 5,
           flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1,
           vegasContext = null, salaryCap = SALARY_CAP, minSalary = 0,
-          secondaryStackSize = 0, tertiaryStackSize = 0 } = opts;
+          secondaryStackSize = 0, tertiaryStackSize = 0, maxPerTeam = 0 } = opts;
 
   const byPos = { QB: [], RB: [], WR: [], TE: [], DST: [] };
   for (const p of pool) if (byPos[p.position]) byPos[p.position].push(p);
   const qbPool = qbTeamFilter ? byPos.QB.filter(p => qbTeamFilter.has(p.team)) : byPos.QB;
 
   const used = new Set();
+  const teamCounts = new Map(); // team -> count placed so far, for maxPerTeam
   const slots = emptySlots();
   let salaryLeft = salaryCap;
   let qbTeam = null, qbOppTeam = null;
@@ -1332,17 +1339,20 @@ function buildOneLineup(pool, opts) {
   let bringBackSatisfied = !requireBringBack;
   let flexUsed = false;
 
+  function recordTeam(p) { teamCounts.set(p.team, (teamCounts.get(p.team) || 0) + 1); }
+  function teamCountOk(team) { return maxPerTeam <= 0 || (teamCounts.get(team) || 0) < maxPerTeam; }
+
   // Places a player into its natural position slot if there's room, otherwise
   // into FLEX (if eligible and FLEX is still open). Returns false if neither
   // slot has room (caller should treat the candidate as unusable).
   function place(p) {
     const slotKey = p.position;
     if (slots[slotKey] && slots[slotKey].length < ROSTER_SLOTS[slotKey]) {
-      slots[slotKey].push(p); used.add(p.id); salaryLeft -= p.salary;
+      slots[slotKey].push(p); used.add(p.id); salaryLeft -= p.salary; recordTeam(p);
       return true;
     }
     if (flexEligible.has(slotKey) && !flexUsed) {
-      slots.FLEX.push(p); used.add(p.id); salaryLeft -= p.salary;
+      slots.FLEX.push(p); used.add(p.id); salaryLeft -= p.salary; recordTeam(p);
       flexUsed = true;
       return true;
     }
@@ -1362,6 +1372,7 @@ function buildOneLineup(pool, opts) {
   function eligible(list, filledCounts) {
     return list.filter(p => {
       if (used.has(p.id)) return false;
+      if (!teamCountOk(p.team)) return false;
       const remaining = remainingSlotsAfter(filledCounts) - 1;
       const minFutureSalary = remaining * 3000; // cheapest realistic DK salary floor
       if (p.salary > salaryLeft - minFutureSalary) return false;
@@ -1385,7 +1396,7 @@ function buildOneLineup(pool, opts) {
     for (let s = 0; s < stackSize; s++) {
       const filledSoFar = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: flexUsed ? 1 : 0 };
       const stackCandidates = [...byPos.RB, ...byPos.WR, ...byPos.TE].filter(
-        p => p.team === qbTeam && !used.has(p.id) &&
+        p => p.team === qbTeam && !used.has(p.id) && teamCountOk(p.team) &&
              p.salary <= salaryLeft - remainingSlotsAfter(filledSoFar) * 3000
       );
       if (stackCandidates.length === 0) break;
@@ -1439,7 +1450,7 @@ function buildOneLineup(pool, opts) {
   if (requireBringBack) {
     const filledSoFar = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: flexUsed ? 1 : 0 };
     const bbCandidates = pool.filter(
-      p => p.team === qbOppTeam && p.position !== "DST" && p.position !== "QB" && !used.has(p.id) &&
+      p => p.team === qbOppTeam && p.position !== "DST" && p.position !== "QB" && !used.has(p.id) && teamCountOk(p.team) &&
            p.salary <= salaryLeft - remainingSlotsAfter(filledSoFar) * 3000
     );
     if (bbCandidates.length > 0) {
@@ -1464,7 +1475,7 @@ function buildOneLineup(pool, opts) {
       const filledSoFar = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: flexUsed ? 1 : 0 };
       const picksLeft = size - s;
       let candidates = [...byPos.RB, ...byPos.WR, ...byPos.TE].filter(
-        p => !used.has(p.id) && !excludeGameKeys.has(gameKeyOf(p)) &&
+        p => !used.has(p.id) && !excludeGameKeys.has(gameKeyOf(p)) && teamCountOk(p.team) &&
              (chosenGame === null || gameKeyOf(p) === chosenGame) &&
              p.salary <= salaryLeft - remainingSlotsAfter(filledSoFar) * 3000
       );
@@ -1509,7 +1520,7 @@ function buildOneLineup(pool, opts) {
       if (candidates.length === 0) return null;
       candidates.sort((a, b) => weight(b) - weight(a));
       const pick = pickWeighted(candidates, rng, topK);
-      slots[pos].push(pick); used.add(pick.id); salaryLeft -= pick.salary;
+      slots[pos].push(pick); used.add(pick.id); salaryLeft -= pick.salary; recordTeam(pick);
     }
   }
 
@@ -1521,7 +1532,7 @@ function buildOneLineup(pool, opts) {
     if (candidates.length === 0) return null;
     candidates.sort((a, b) => weight(b) - weight(a));
     const flexPick = pickWeighted(candidates, rng, topK);
-    slots.FLEX.push(flexPick); used.add(flexPick.id); salaryLeft -= flexPick.salary;
+    slots.FLEX.push(flexPick); used.add(flexPick.id); salaryLeft -= flexPick.salary; recordTeam(flexPick);
   }
 
   if (requireStack && !stackSatisfied) return null;
@@ -1534,6 +1545,11 @@ function buildOneLineup(pool, opts) {
   const finalSalary = lineupSalary(arr);
   if (finalSalary > salaryCap) return null;
   if (finalSalary < minSalary) return null;
+  if (maxPerTeam > 0) {
+    const finalCounts = new Map();
+    for (const p of arr) finalCounts.set(p.team, (finalCounts.get(p.team) || 0) + 1);
+    if ([...finalCounts.values()].some(c => c > maxPerTeam)) return null;
+  }
   return { slots, arr };
 }
 
@@ -1543,9 +1559,21 @@ function buildOneLineup(pool, opts) {
 function improveLineup(lineup, pool, scoreFn, opts = {}) {
   const { requireStack = false, requireBringBack = false, iterations = 60,
           flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1,
-          salaryCap = SALARY_CAP, minSalary = 0, secondaryStackSize = 0, tertiaryStackSize = 0 } = opts;
+          salaryCap = SALARY_CAP, minSalary = 0, secondaryStackSize = 0, tertiaryStackSize = 0,
+          maxPerTeam = 0 } = opts;
   let { slots, arr } = lineup;
   const usedIds = new Set(arr.map(p => p.id));
+
+  function teamCountsOkArr(arrX) {
+    if (maxPerTeam <= 0) return true;
+    const counts = new Map();
+    for (const p of arrX) {
+      const c = (counts.get(p.team) || 0) + 1;
+      if (c > maxPerTeam) return false;
+      counts.set(p.team, c);
+    }
+    return true;
+  }
 
   function qbTeamOf(arrX) { const qb = arrX.find(p => p.position === "QB"); return qb ? qb.team : null; }
   function qbOppOf(arrX) { const qb = arrX.find(p => p.position === "QB"); return qb ? oppTeam(qb) : null; }
@@ -1618,7 +1646,7 @@ function improveLineup(lineup, pool, scoreFn, opts = {}) {
         const newBBOk = !requireBringBack || hasBringBackArr(newArr);
         const newAdditionalOk = hasAdditionalStacksArr(newArr);
         const newSalary = lineupSalary(newArr);
-        if (newSalary <= salaryCap && newSalary >= minSalary && newStackOk && newBBOk && newAdditionalOk) {
+        if (newSalary <= salaryCap && newSalary >= minSalary && newStackOk && newBBOk && newAdditionalOk && teamCountsOkArr(newArr)) {
           usedIds.delete(p.id); usedIds.add(best.id);
           arr = newArr;
           improved = true;
@@ -1917,7 +1945,7 @@ function generateCorrelatedLineups(players, n, opts = {}) {
           maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
           flexEligible = FLEX_ELIGIBLE, stackTeams = null, stackSize = 1,
           vegasContext = null, salaryCap = SALARY_CAP, minSalary = 0, ceilingWeight = 1.0,
-          secondaryStackSize = 0, tertiaryStackSize = 0, boosts = null } = opts;
+          secondaryStackSize = 0, tertiaryStackSize = 0, boosts = null, maxPerTeam = 0 } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
   const qbTeamFilter = (stackTeams && stackTeams.length > 0) ? new Set(stackTeams) : null;
@@ -1940,12 +1968,12 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   for (let i = 0; i < poolAttempts; i++) {
     const wantBringBack = rng() < bringBackShare;
     const built = buildOneLineup(players, {
-      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize, vegasContext, salaryCap, minSalary,
+      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize, vegasContext, salaryCap, minSalary, maxPerTeam,
       requireStack: true, requireBringBack: wantBringBack, secondaryStackSize, tertiaryStackSize,
     });
     if (!built) continue;
     const improved = improveLineup(built, players, leverageScore, {
-      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize, salaryCap, minSalary,
+      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize, salaryCap, minSalary, maxPerTeam,
       secondaryStackSize, tertiaryStackSize,
     });
     const sig = signature(improved.arr);
@@ -3265,6 +3293,9 @@ if (typeof window !== "undefined") {
     valMinProj: document.getElementById("valMinProj"),
     sliderMinSalary: document.getElementById("sliderMinSalary"),
     valMinSalary: document.getElementById("valMinSalary"),
+    maxPerTeamGroup: document.getElementById("maxPerTeamGroup"),
+    sliderMaxPerTeam: document.getElementById("sliderMaxPerTeam"),
+    valMaxPerTeam: document.getElementById("valMaxPerTeam"),
     sliderLargeOwn: document.getElementById("sliderLargeOwn"),
     sliderBringback: document.getElementById("sliderBringback"),
     sliderStackSize: document.getElementById("sliderStackSize"),
@@ -3366,6 +3397,7 @@ if (typeof window !== "undefined") {
     els.tertiaryStackGroup.style.display = showClassicOnly;
     els.bringbackGroup.style.display = showClassicOnly;
     els.teFlexGroup.style.display = showClassicOnly;
+    els.maxPerTeamGroup.style.display = showClassicOnly;
     // Vegas lines now matter in both modes (bring-backs in Classic; the
     // game-script baseline in Showdown).
     els.vegasGroup.style.display = "block";
@@ -3517,6 +3549,10 @@ if (typeof window !== "undefined") {
     els.valMinSalary.textContent = `${pct}% ($${dollars.toLocaleString()})`;
   }
   els.sliderMinSalary.addEventListener("input", updateMinSalaryLabel);
+  els.sliderMaxPerTeam.addEventListener("input", () => {
+    const n = parseInt(els.sliderMaxPerTeam.value, 10);
+    els.valMaxPerTeam.textContent = n === 0 ? "Off" : `${n} player${n === 1 ? "" : "s"}`;
+  });
   bindSlider(els.sliderLargeOwn, els.valLargeOwn, "%");
   bindSlider(els.sliderBringback, els.valBringback, "%");
   els.sliderStackSize.addEventListener("input", () => {
@@ -4148,21 +4184,22 @@ if (typeof window !== "undefined") {
           const gppPlayers = players.filter(p => p.proj >= minProj);
           const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
           const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
+          const maxPerTeam = parseInt(els.sliderMaxPerTeam.value, 10);
           state.results.small = eng.generateCorrelatedLineups(gppPlayers, n, {
-            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts,
+            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts, maxPerTeam,
             ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
             stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
           });
-          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, showdown: false };
+          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, maxPerTeam, showdown: false };
           setStatus("Generating Large Field GPP lineups...");
           setTimeout(() => {
             const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
             state.results.large = eng.generateCorrelatedLineups(gppPlayers, n, {
-              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts,
+              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts, maxPerTeam,
               ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
               stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
             });
-            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, showdown: false };
+            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, maxPerTeam, showdown: false };
             setStatus("Done.");
             els.generateBtn.disabled = false;
             els.exportBtn.disabled = false;
@@ -4240,6 +4277,7 @@ if (typeof window !== "undefined") {
       const list = [...meta.boosts.entries()].map(([name, f]) => `${escapeHtml(name)} +${Math.round(f * 100)}%`).join(", ");
       parts.push(`<b>Player boosts:</b> ${list} (GPP selection only — real Proj/Ceiling unchanged)`);
     }
+    if (meta.maxPerTeam > 0) parts.push(`<b>Max per team:</b> ${meta.maxPerTeam} player${meta.maxPerTeam === 1 ? "" : "s"}`);
     return `<div class="metric-banner">${parts.map(p => `<span>${p}</span>`).join("")}</div>`;
   }
 
@@ -4289,8 +4327,12 @@ if (typeof window !== "undefined") {
       else if (stackCount === 1) badgesHtml += `<span class="badge stack">STACK</span>`;
       if (hasBB) badgesHtml += `<span class="badge bringback">BRING-BACK</span>`;
 
-      // Additional game stacks: any OTHER game (not the QB's) where both
-      // teams have at least one RB/WR/TE in the lineup, ranked by size.
+      // Additional stacks: any OTHER game (not the QB's) with 2+ RB/WR/TE
+      // total. Previously this required BOTH teams of that game to be
+      // represented, which silently dropped the common case of 2+
+      // teammates from a team whose opponent isn't rostered at all —
+      // a real stack, just not a two-sided game stack. Both now get a
+      // badge; only the label differs (GAME vs STACK).
       const qbGameKey = qb ? [qb.team, qbOpp].sort().join("-") : null;
       const otherGames = new Map();
       arr.forEach(p => {
@@ -4302,12 +4344,17 @@ if (typeof window !== "undefined") {
         g[p.team] = (g[p.team] || 0) + 1;
       });
       const otherStacks = [...otherGames.values()]
-        .filter(g => Object.keys(g).length >= 2)
-        .map(g => ({ total: Object.values(g).reduce((a, b) => a + b, 0), label: Object.entries(g).map(([t, c]) => `${t}×${c}`).join(" / ") }))
+        .map(g => ({
+          total: Object.values(g).reduce((a, b) => a + b, 0),
+          isGameStack: Object.keys(g).length >= 2,
+          label: Object.entries(g).map(([t, c]) => `${t}×${c}`).join(" / "),
+        }))
+        .filter(st => st.total >= 2)
         .sort((a, b) => b.total - a.total);
       otherStacks.forEach((st, idx) => {
-        const label = idx === 0 ? "2ND GAME" : "3RD GAME";
-        badgesHtml += `<span class="badge bringback">${label}: ${st.label}</span>`;
+        const ordinal = idx === 0 ? "2ND" : idx === 1 ? "3RD" : `${idx + 2}TH`;
+        const kind = st.isGameStack ? "GAME" : "STACK";
+        badgesHtml += `<span class="badge bringback">${ordinal} ${kind}: ${st.label}</span>`;
       });
     }
 
@@ -4525,6 +4572,7 @@ if (typeof window !== "undefined") {
       hint += isShowdown
         ? " If you've raised Minimum salary used, note Showdown's achievable maximum is often well below 100% of the cap (just two teams' depth charts) — try lowering it."
         : " If you've raised Minimum salary used, try lowering it too.";
+      if (!isShowdown) hint += " If Max players from one team is set below Stack size + 1, that directly conflicts with your own stack requirement — raise the cap or lower Stack size.";
     }
     let why;
     if (isShowdown) {

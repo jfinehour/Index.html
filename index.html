@@ -2782,6 +2782,7 @@ function buildSyntheticField(players, opts) {
     totalEntries, fieldSampleSize = 400, seed = 1,
     ownershipField = "ownLarge", isShowdown = false,
     salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE, sharpShare = 0.35,
+    consensusShare = 0.15, consensusCount = 8,
   } = opts;
 
   if (!totalEntries || totalEntries < 2) throw new Error("Total entries must be at least 2.");
@@ -2838,12 +2839,45 @@ function buildSyntheticField(players, opts) {
     }).map(r => r.arr);
   }
 
-  const totalOtherEntries = Math.max(0, totalEntries - 1);
-  const naiveEntryShare = totalOtherEntries * (1 - sharpShare);
-  const sharpEntryShare = totalOtherEntries * sharpShare;
+  // "Consensus" opponents: a small set of the most obvious, highest-value-
+  // AND-highest-owned builds. The naive per-slot-independent sampling above
+  // badly under-represents how often real entrants — many using similar
+  // optimizer tools — converge on the exact same "best" lineup, not just
+  // similar aggregate ownership. Verified directly on a real field: the
+  // single most-duplicated naive archetype carried just 0.25% of total
+  // weight, and the literal mathematically-optimal lineup had ZERO
+  // matching duplicates in the field at all. Real large-field GPPs do not
+  // work that way — a meaningful chunk of entrants land on the same
+  // obvious plays, and ties split the payout for the ranks they jointly
+  // occupy. This explicitly injects the top-N "obvious" builds (ranked by
+  // a blended value+ownership objective) with real, concentrated weight —
+  // geometric decay so the single most obvious play dominates and each
+  // subsequent one contributes rapidly less.
+  const consensusScoreFn = (p) => {
+    const own = p[ownershipField];
+    const ownVal = (own != null && !isNaN(own)) ? own : 0;
+    return p.proj * (1 + ownVal / 100); // rewards being BOTH good and popular
+  };
+  const consensusSeed = (seed * 3 + 1) >>> 0;
+  const consensusLineups = isShowdown
+    ? generateShowdownTopN(players, consensusScoreFn, consensusCount, { attempts: 500, seed: consensusSeed, salaryCap })
+    : generateTopN(players, consensusScoreFn, consensusCount, { attempts: 500, seed: consensusSeed, salaryCap, flexEligible });
 
-  const archetypes = [...rankedNaive.map(a => a.arr), ...sharpLineups];
+  const totalOtherEntries = Math.max(0, totalEntries - 1);
+  const effectiveConsensusShare = consensusLineups.length > 0 ? consensusShare : 0;
+  const consensusEntryShare = totalOtherEntries * effectiveConsensusShare;
+  const remainingShare = 1 - effectiveConsensusShare;
+  const naiveEntryShare = totalOtherEntries * remainingShare * (1 - sharpShare);
+  const sharpEntryShare = totalOtherEntries * remainingShare * sharpShare;
+
+  const decayRatio = 0.55;
+  const rawDecayWeights = consensusLineups.map((_, i) => Math.pow(decayRatio, i));
+  const rawDecaySum = rawDecayWeights.reduce((a, b) => a + b, 0) || 1;
+  const consensusWeights = rawDecayWeights.map(w => (w / rawDecaySum) * consensusEntryShare);
+
+  const archetypes = [...consensusLineups, ...rankedNaive.map(a => a.arr), ...sharpLineups];
   const archetypeWeights = [
+    ...consensusWeights,
     ...rankedNaive.map(a => keptNaiveDraws > 0 ? (a.count / keptNaiveDraws) * naiveEntryShare : 0),
     ...sharpLineups.map(() => sharpLineups.length > 0 ? sharpEntryShare / sharpLineups.length : 0),
   ];
@@ -4765,7 +4799,7 @@ if (typeof window !== "undefined") {
     const entries = collectAllLineupsForSim();
     const introHtml = `<div class="sim-intro">
       <b>What this does:</b> builds a synthetic opponent field by sampling players proportional to their actual ownership %, then runs the same correlated slate simulation across your lineup(s) and that whole field together — ranking you against them each iteration and mapping that rank to your payout table.<br><br>
-      <b>The field is a blend of two opponent types:</b> most are sampled independently per slot by ownership (approximating casual entrants), and a share are built with this app's own stacked, leverage-aware engine (approximating sharper opponents — many real large-field entrants use optimizer tools too, not just casual guessing). The "Sharp opponent share" slider controls that mix; there's no ground truth for the real split, so treat it as adjustable, not authoritative.<br><br>
+      <b>The field is a blend of three opponent types:</b> most are sampled independently per slot by ownership (approximating casual entrants), a share are built with this app's own stacked, leverage-aware engine (approximating sharper opponents — many real large-field entrants use optimizer tools too), and a small set are the most obvious "consensus" builds — the highest-value, highest-owned combinations — given real concentrated weight rather than treated as just one archetype among hundreds. That last piece matters: independent per-slot sampling badly under-represents how often real entrants converge on the exact same popular lineup, not just similar aggregate ownership. Tested directly on a real field: before this fix, the single most-duplicated archetype carried just 0.25% of total weight, and the literal mathematically-optimal lineup had zero matching duplicates — meaning a chalky lineup could reach literal 1st place in simulation and show wildly inflated ROI, when in reality it would likely tie with hundreds of identical entries and split the payout. The "Sharp opponent share" and "Consensus chalk weight" sliders control this mix; there's no ground truth for the real split, so treat both as adjustable, not authoritative.<br><br>
       <b>Field resolution matters more than it first seems:</b> the synthetic field only samples a limited number of distinct opponent rosters to stand in for the real field size. Testing this directly showed the earlier 400-archetype default made reaching literal 1st place happen far too often — beating the maximum of a small sample is mathematically easier than beating the true maximum across 17,000+ real, independently-built rosters. Push the "Field resolution" slider higher for a more realistic (if slower) estimate, especially before trusting a lineup's Best Rank.<br><br>
       <b>Real limitations, stated plainly:</b> every lineup here is treated as an <i>independently entered single ticket</i>, not part of a multi-entry strategy. This payout curve is extremely top-heavy, so <b>ROI% carries real run-to-run noise</b> even at 1,000 simulation runs — a single rare 1st-place finish swings the average enormously, and testing this confirmed ROI% can vary by hundreds of percentage points between otherwise-identical runs. <b>Cash Rate is a meaningfully more stable number</b> and worth weighting more heavily. Treat this whole tool as most reliable for <b>comparing your own lineups against each other</b>, not as a literal, precise expected-winnings promise.
     </div>`;
@@ -4781,6 +4815,11 @@ if (typeof window !== "undefined") {
       <div class="slider-label"><b>Sharp opponent share</b><span class="val" id="valSharpShare">35%</span></div>
       <input type="range" id="sliderSharpShare" min="0" max="80" step="5" value="35">
       <div class="slider-note">Share of the synthetic field built with this app's own stacked/correlated logic (vs. independently-sampled casual entrants). Higher = tougher, more realistic field.</div>
+    </div>
+    <div class="slider-group">
+      <div class="slider-label"><b>Consensus chalk weight</b><span class="val" id="valConsensusShare">15%</span></div>
+      <input type="range" id="sliderConsensusShare" min="0" max="40" step="5" value="15">
+      <div class="slider-note">Share of the field assumed to converge on a small handful of the most obvious, highest-owned builds — not spread independently across hundreds of distinct combinations. This is specifically what makes a very chalky lineup's simulated ROI drop once you account for likely ties: duplicated entries split the payout for the ranks they jointly occupy. Set to 0 to disable and go back to independent sampling only.</div>
     </div>
     <div class="slider-group">
       <div class="slider-label"><b>Field resolution</b><span class="val" id="valFieldSize">1500 archetypes</span></div>
@@ -4963,6 +5002,10 @@ if (typeof window !== "undefined") {
     const sharpVal = document.getElementById("valSharpShare");
     if (sharpSlider) sharpSlider.addEventListener("input", () => { sharpVal.textContent = sharpSlider.value + "%"; });
 
+    const consensusSlider = document.getElementById("sliderConsensusShare");
+    const consensusVal = document.getElementById("valConsensusShare");
+    if (consensusSlider) consensusSlider.addEventListener("input", () => { consensusVal.textContent = consensusSlider.value + "%"; });
+
     const fieldSizeSlider = document.getElementById("sliderFieldSize");
     const fieldSizeVal = document.getElementById("valFieldSize");
     if (fieldSizeSlider) fieldSizeSlider.addEventListener("input", () => { fieldSizeVal.textContent = fieldSizeSlider.value + " archetypes"; });
@@ -4985,6 +5028,7 @@ if (typeof window !== "undefined") {
         }
         const iterations = parseInt(contestSlider.value, 10);
         const sharpShare = parseInt(sharpSlider.value, 10) / 100;
+        const consensusShare = parseInt(consensusSlider.value, 10) / 100;
         const fieldSampleSize = parseInt(fieldSizeSlider.value, 10);
         const isShowdown = state.contestType === "showdown";
         contestBtn.disabled = true;
@@ -4995,7 +5039,7 @@ if (typeof window !== "undefined") {
           try {
             contestStatus.textContent = "Building synthetic field...";
             const field = eng.buildSyntheticField(state.generationPool || state.players, {
-              totalEntries: c.totalEntries, fieldSampleSize, seed: 1, sharpShare,
+              totalEntries: c.totalEntries, fieldSampleSize, seed: 1, sharpShare, consensusShare,
               ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
             });
             contestStatus.textContent = `Field built (${field.archetypes.length} archetypes) — evaluating ${entries.length} lineups...`;

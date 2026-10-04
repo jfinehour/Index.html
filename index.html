@@ -832,9 +832,13 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
       </div>
 
       <div class="slider-group" id="maxPerTeamGroup">
-        <div class="slider-label"><b>Max players from one team (Classic GPP only)</b><span class="val" id="valMaxPerTeam">Off</span></div>
-        <input type="range" id="sliderMaxPerTeam" min="0" max="9" value="0" step="1">
-        <div class="slider-note">Caps how many total players (including the QB) can come from a single team in Small/Large Field lineups. Set below Stack size + 1 and it'll conflict with your own stack requirement, producing zero lineups — the stack is checked first. Doesn't apply to Showdown, where Roster Structure already controls the per-team split directly. Set to 0 to disable.</div>
+        <div class="slider-label"><b>Max from main stack team (Classic GPP only)</b><span class="val" id="valMaxMainTeam">Off</span></div>
+        <input type="range" id="sliderMaxMainTeam" min="0" max="9" value="0" step="1">
+        <div class="slider-note">Caps how many total players (including the QB) can come from the QB's own team. Set below Stack size + 1 and it'll conflict with your own stack requirement, producing zero lineups — the stack is checked first. Set to 0 to disable.</div>
+
+        <div class="slider-label" style="margin-top:14px;"><b>Max from any other team</b><span class="val" id="valMaxOtherTeam">Off</span></div>
+        <input type="range" id="sliderMaxOtherTeam" min="0" max="9" value="0" step="1">
+        <div class="slider-note">Caps how many players can come from any team <i>other</i> than the QB's — independent of the cap above, so you can allow a big main stack while keeping every other team diversified (e.g. up to 4 from your stack, never more than 2 from anyone else). Doesn't apply to Showdown, where Roster Structure already controls the per-team split directly. Set to 0 to disable.</div>
       </div>
 
       <div class="slider-group">
@@ -1324,14 +1328,15 @@ function buildOneLineup(pool, opts) {
           exposure = new Map(), maxExposure = null, topK = 5,
           flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1,
           vegasContext = null, salaryCap = SALARY_CAP, minSalary = 0,
-          secondaryStackSize = 0, tertiaryStackSize = 0, maxPerTeam = 0 } = opts;
+          secondaryStackSize = 0, tertiaryStackSize = 0,
+          maxMainTeam = 0, maxOtherTeam = 0 } = opts;
 
   const byPos = { QB: [], RB: [], WR: [], TE: [], DST: [] };
   for (const p of pool) if (byPos[p.position]) byPos[p.position].push(p);
   const qbPool = qbTeamFilter ? byPos.QB.filter(p => qbTeamFilter.has(p.team)) : byPos.QB;
 
   const used = new Set();
-  const teamCounts = new Map(); // team -> count placed so far, for maxPerTeam
+  const teamCounts = new Map(); // team -> count placed so far, for maxMainTeam/maxOtherTeam
   const slots = emptySlots();
   let salaryLeft = salaryCap;
   let qbTeam = null, qbOppTeam = null;
@@ -1340,7 +1345,13 @@ function buildOneLineup(pool, opts) {
   let flexUsed = false;
 
   function recordTeam(p) { teamCounts.set(p.team, (teamCounts.get(p.team) || 0) + 1); }
-  function teamCountOk(team) { return maxPerTeam <= 0 || (teamCounts.get(team) || 0) < maxPerTeam; }
+  // The QB's own team gets its own (usually higher) cap — "main stack" —
+  // every other team is capped separately, usually lower, so you can say
+  // "up to 4 from my stack team, but never more than 2 from anyone else."
+  function teamCountOk(team) {
+    const limit = team === qbTeam ? maxMainTeam : maxOtherTeam;
+    return limit <= 0 || (teamCounts.get(team) || 0) < limit;
+  }
 
   // Places a player into its natural position slot if there's room, otherwise
   // into FLEX (if eligible and FLEX is still open). Returns false if neither
@@ -1545,10 +1556,13 @@ function buildOneLineup(pool, opts) {
   const finalSalary = lineupSalary(arr);
   if (finalSalary > salaryCap) return null;
   if (finalSalary < minSalary) return null;
-  if (maxPerTeam > 0) {
+  if (maxMainTeam > 0 || maxOtherTeam > 0) {
     const finalCounts = new Map();
     for (const p of arr) finalCounts.set(p.team, (finalCounts.get(p.team) || 0) + 1);
-    if ([...finalCounts.values()].some(c => c > maxPerTeam)) return null;
+    for (const [team, count] of finalCounts) {
+      const limit = team === qbTeam ? maxMainTeam : maxOtherTeam;
+      if (limit > 0 && count > limit) return null;
+    }
   }
   return { slots, arr };
 }
@@ -1560,16 +1574,18 @@ function improveLineup(lineup, pool, scoreFn, opts = {}) {
   const { requireStack = false, requireBringBack = false, iterations = 60,
           flexEligible = FLEX_ELIGIBLE, qbTeamFilter = null, stackSize = 1,
           salaryCap = SALARY_CAP, minSalary = 0, secondaryStackSize = 0, tertiaryStackSize = 0,
-          maxPerTeam = 0 } = opts;
+          maxMainTeam = 0, maxOtherTeam = 0 } = opts;
   let { slots, arr } = lineup;
   const usedIds = new Set(arr.map(p => p.id));
 
   function teamCountsOkArr(arrX) {
-    if (maxPerTeam <= 0) return true;
+    if (maxMainTeam <= 0 && maxOtherTeam <= 0) return true;
+    const mainTeam = qbTeamOf(arrX);
     const counts = new Map();
     for (const p of arrX) {
       const c = (counts.get(p.team) || 0) + 1;
-      if (c > maxPerTeam) return false;
+      const limit = p.team === mainTeam ? maxMainTeam : maxOtherTeam;
+      if (limit > 0 && c > limit) return false;
       counts.set(p.team, c);
     }
     return true;
@@ -1945,7 +1961,7 @@ function generateCorrelatedLineups(players, n, opts = {}) {
           maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
           flexEligible = FLEX_ELIGIBLE, stackTeams = null, stackSize = 1,
           vegasContext = null, salaryCap = SALARY_CAP, minSalary = 0, ceilingWeight = 1.0,
-          secondaryStackSize = 0, tertiaryStackSize = 0, boosts = null, maxPerTeam = 0 } = opts;
+          secondaryStackSize = 0, tertiaryStackSize = 0, boosts = null, maxMainTeam = 0, maxOtherTeam = 0 } = opts;
   const rng = mulberry32(seed);
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
   const qbTeamFilter = (stackTeams && stackTeams.length > 0) ? new Set(stackTeams) : null;
@@ -1968,12 +1984,12 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   for (let i = 0; i < poolAttempts; i++) {
     const wantBringBack = rng() < bringBackShare;
     const built = buildOneLineup(players, {
-      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize, vegasContext, salaryCap, minSalary, maxPerTeam,
+      scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize, vegasContext, salaryCap, minSalary, maxMainTeam, maxOtherTeam,
       requireStack: true, requireBringBack: wantBringBack, secondaryStackSize, tertiaryStackSize,
     });
     if (!built) continue;
     const improved = improveLineup(built, players, leverageScore, {
-      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize, salaryCap, minSalary, maxPerTeam,
+      requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize, salaryCap, minSalary, maxMainTeam, maxOtherTeam,
       secondaryStackSize, tertiaryStackSize,
     });
     const sig = signature(improved.arr);
@@ -3328,8 +3344,10 @@ if (typeof window !== "undefined") {
     sliderMinSalary: document.getElementById("sliderMinSalary"),
     valMinSalary: document.getElementById("valMinSalary"),
     maxPerTeamGroup: document.getElementById("maxPerTeamGroup"),
-    sliderMaxPerTeam: document.getElementById("sliderMaxPerTeam"),
-    valMaxPerTeam: document.getElementById("valMaxPerTeam"),
+    sliderMaxMainTeam: document.getElementById("sliderMaxMainTeam"),
+    valMaxMainTeam: document.getElementById("valMaxMainTeam"),
+    sliderMaxOtherTeam: document.getElementById("sliderMaxOtherTeam"),
+    valMaxOtherTeam: document.getElementById("valMaxOtherTeam"),
     sliderLargeOwn: document.getElementById("sliderLargeOwn"),
     sliderBringback: document.getElementById("sliderBringback"),
     sliderStackSize: document.getElementById("sliderStackSize"),
@@ -3583,9 +3601,13 @@ if (typeof window !== "undefined") {
     els.valMinSalary.textContent = `${pct}% ($${dollars.toLocaleString()})`;
   }
   els.sliderMinSalary.addEventListener("input", updateMinSalaryLabel);
-  els.sliderMaxPerTeam.addEventListener("input", () => {
-    const n = parseInt(els.sliderMaxPerTeam.value, 10);
-    els.valMaxPerTeam.textContent = n === 0 ? "Off" : `${n} player${n === 1 ? "" : "s"}`;
+  els.sliderMaxMainTeam.addEventListener("input", () => {
+    const n = parseInt(els.sliderMaxMainTeam.value, 10);
+    els.valMaxMainTeam.textContent = n === 0 ? "Off" : `${n} player${n === 1 ? "" : "s"}`;
+  });
+  els.sliderMaxOtherTeam.addEventListener("input", () => {
+    const n = parseInt(els.sliderMaxOtherTeam.value, 10);
+    els.valMaxOtherTeam.textContent = n === 0 ? "Off" : `${n} player${n === 1 ? "" : "s"}`;
   });
   bindSlider(els.sliderLargeOwn, els.valLargeOwn, "%");
   bindSlider(els.sliderBringback, els.valBringback, "%");
@@ -4218,22 +4240,23 @@ if (typeof window !== "undefined") {
           const gppPlayers = players.filter(p => p.proj >= minProj);
           const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
           const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
-          const maxPerTeam = parseInt(els.sliderMaxPerTeam.value, 10);
+          const maxMainTeam = parseInt(els.sliderMaxMainTeam.value, 10);
+          const maxOtherTeam = parseInt(els.sliderMaxOtherTeam.value, 10);
           state.results.small = eng.generateCorrelatedLineups(gppPlayers, n, {
-            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts, maxPerTeam,
+            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts, maxMainTeam, maxOtherTeam,
             ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
             stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
           });
-          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, maxPerTeam, showdown: false };
+          state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, maxMainTeam, maxOtherTeam, showdown: false };
           setStatus("Generating Large Field GPP lineups...");
           setTimeout(() => {
             const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
             state.results.large = eng.generateCorrelatedLineups(gppPlayers, n, {
-              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts, maxPerTeam,
+              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts, maxMainTeam, maxOtherTeam,
               ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
               stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
             });
-            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, maxPerTeam, showdown: false };
+            state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, maxMainTeam, maxOtherTeam, showdown: false };
             setStatus("Done.");
             els.generateBtn.disabled = false;
             els.exportBtn.disabled = false;
@@ -4311,7 +4334,8 @@ if (typeof window !== "undefined") {
       const list = [...meta.boosts.entries()].map(([name, f]) => `${escapeHtml(name)} +${Math.round(f * 100)}%`).join(", ");
       parts.push(`<b>Player boosts:</b> ${list} (GPP selection only — real Proj/Ceiling unchanged)`);
     }
-    if (meta.maxPerTeam > 0) parts.push(`<b>Max per team:</b> ${meta.maxPerTeam} player${meta.maxPerTeam === 1 ? "" : "s"}`);
+    if (meta.maxMainTeam > 0) parts.push(`<b>Max main stack team:</b> ${meta.maxMainTeam} player${meta.maxMainTeam === 1 ? "" : "s"}`);
+    if (meta.maxOtherTeam > 0) parts.push(`<b>Max any other team:</b> ${meta.maxOtherTeam} player${meta.maxOtherTeam === 1 ? "" : "s"}`);
     return `<div class="metric-banner">${parts.map(p => `<span>${p}</span>`).join("")}</div>`;
   }
 
@@ -4606,7 +4630,7 @@ if (typeof window !== "undefined") {
       hint += isShowdown
         ? " If you've raised Minimum salary used, note Showdown's achievable maximum is often well below 100% of the cap (just two teams' depth charts) — try lowering it."
         : " If you've raised Minimum salary used, try lowering it too.";
-      if (!isShowdown) hint += " If Max players from one team is set below Stack size + 1, that directly conflicts with your own stack requirement — raise the cap or lower Stack size.";
+      if (!isShowdown) hint += " If Max from main stack team is set below Stack size + 1, that directly conflicts with your own stack requirement — raise the cap or lower Stack size.";
     }
     let why;
     if (isShowdown) {

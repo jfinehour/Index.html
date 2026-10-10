@@ -4943,6 +4943,17 @@ if (typeof window !== "undefined") {
     document.querySelectorAll("[data-attr-sort]").forEach(h => h.addEventListener("click", () => { state.attrSort = h.dataset.attrSort; render(); }));
   }
 
+  function resolveFieldSize(pct, entries) {
+    const hi = Math.min(entries, 6000);
+    const lo = Math.min(1000, entries);
+    return Math.max(lo, Math.min(hi, Math.round(entries * pct / 100)));
+  }
+  function fieldSizeLabel(pct, entries) {
+    const n = resolveFieldSize(pct, entries);
+    const per = entries / n;
+    return `${pct}% → ${n.toLocaleString()} archetypes (each ≈ ${per < 10 ? per.toFixed(1) : Math.round(per)} entries)`;
+  }
+
   function renderContestROISection() {
     const entries = collectAllLineupsForSim();
     const introHtml = `<div class="sim-intro">
@@ -4970,9 +4981,9 @@ if (typeof window !== "undefined") {
       <div class="slider-note">Share of the field assumed to converge on a small handful of the most obvious, highest-owned builds — not spread independently across hundreds of distinct combinations. This is specifically what makes a very chalky lineup's simulated ROI drop once you account for likely ties: duplicated entries split the payout for the ranks they jointly occupy. Set to 0 to disable and go back to independent sampling only.</div>
     </div>
     <div class="slider-group">
-      <div class="slider-label"><b>Field resolution</b><span class="val" id="valFieldSize">3000 archetypes</span></div>
-      <input type="range" id="sliderFieldSize" min="400" max="6000" step="200" value="3000">
-      <div class="slider-note">How many distinct opponent rosters stand in for the real field. Too few understates how hard it is to hit the very top spots — testing this directly showed the previous 400-archetype default let lineups reach literal 1st place far too easily, since beating a small sample is mathematically easier than beating 17,000+ real competitors. Higher = more realistic tail, but slower.</div>
+      <div class="slider-label"><b>Field resolution</b><span class="val" id="valFieldSize">${fieldSizeLabel(state.fieldPct || 18, activePreset.totalEntries)}</span></div>
+      <input type="range" id="sliderFieldSize" min="5" max="40" step="1" value="${state.fieldPct || 18}">
+      <div class="slider-note">How many distinct opponent rosters stand in for the real field, as a percent of its entries (kept between ~1,000 and 6,000 archetypes, never more than the number of entries). Too few understates how hard it is to hit the very top spots — testing this directly showed the previous 400-archetype default let lineups reach literal 1st place far too easily, since beating a small sample is mathematically easier than beating 17,000+ real competitors. Higher = more realistic tail, but slower.</div>
     </div>
     <div class="sim-controls">
       <div class="slider-group">
@@ -5156,7 +5167,11 @@ if (typeof window !== "undefined") {
 
     const fieldSizeSlider = document.getElementById("sliderFieldSize");
     const fieldSizeVal = document.getElementById("valFieldSize");
-    if (fieldSizeSlider) fieldSizeSlider.addEventListener("input", () => { fieldSizeVal.textContent = fieldSizeSlider.value + " archetypes"; });
+    if (fieldSizeSlider) fieldSizeSlider.addEventListener("input", () => {
+      state.fieldPct = parseInt(fieldSizeSlider.value, 10);
+      const pc = state.contestPresets.find(p => p.id === state.activeContestPresetId);
+      fieldSizeVal.textContent = fieldSizeLabel(state.fieldPct, pc ? pc.totalEntries : 10000);
+    });
 
     const contestSlider = document.getElementById("sliderContestRuns");
     const contestVal = document.getElementById("valContestRuns");
@@ -5177,7 +5192,7 @@ if (typeof window !== "undefined") {
         const iterations = parseInt(contestSlider.value, 10);
         const sharpShare = parseInt(sharpSlider.value, 10) / 100;
         const consensusShare = parseInt(consensusSlider.value, 10) / 100;
-        const fieldSampleSize = parseInt(fieldSizeSlider.value, 10);
+        const fieldSampleSize = resolveFieldSize(parseInt(fieldSizeSlider.value, 10), c.totalEntries);
         const isShowdown = state.contestType === "showdown";
         contestBtn.disabled = true;
         contestBtn.textContent = "Simulating...";

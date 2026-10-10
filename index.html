@@ -3335,7 +3335,7 @@ if (typeof window !== "undefined") {
     showdownScript: { configs: new Set(), winner: null, total: null, line: "", strength: 0.6 },
     generationPool: null, // the player pool the current lineups were actually built from
     buildInfo: null,      // what to show in the banner above showdown lineups
-    simMode: "distribution", // "distribution" | "contest"
+    simMode: "contest", // "distribution" | "contest"
     contestPresets: makeSeededContestPresets(),
     activeContestPresetId: "preset_large_single",
     contestFormMode: "view", // "view" | "add" | "edit"
@@ -4970,14 +4970,14 @@ if (typeof window !== "undefined") {
       <div class="slider-note">Share of the field assumed to converge on a small handful of the most obvious, highest-owned builds — not spread independently across hundreds of distinct combinations. This is specifically what makes a very chalky lineup's simulated ROI drop once you account for likely ties: duplicated entries split the payout for the ranks they jointly occupy. Set to 0 to disable and go back to independent sampling only.</div>
     </div>
     <div class="slider-group">
-      <div class="slider-label"><b>Field resolution</b><span class="val" id="valFieldSize">1500 archetypes</span></div>
-      <input type="range" id="sliderFieldSize" min="400" max="3000" step="200" value="1500">
+      <div class="slider-label"><b>Field resolution</b><span class="val" id="valFieldSize">3000 archetypes</span></div>
+      <input type="range" id="sliderFieldSize" min="400" max="6000" step="200" value="3000">
       <div class="slider-note">How many distinct opponent rosters stand in for the real field. Too few understates how hard it is to hit the very top spots — testing this directly showed the previous 400-archetype default let lineups reach literal 1st place far too easily, since beating a small sample is mathematically easier than beating 17,000+ real competitors. Higher = more realistic tail, but slower.</div>
     </div>
     <div class="sim-controls">
       <div class="slider-group">
-        <div class="slider-label"><b>Simulation runs</b><span class="val" id="valContestRuns">500</span></div>
-        <input type="range" id="sliderContestRuns" min="100" max="1000" step="50" value="500">
+        <div class="slider-label"><b>Simulation runs</b><span class="val" id="valContestRuns">1000</span></div>
+        <input type="range" id="sliderContestRuns" min="100" max="3000" step="100" value="1000">
       </div>
       <button type="button" class="btn btn-primary" id="runContestBtn" style="flex:0 0 auto; min-width:140px;">Run Contest ROI</button>
     </div>

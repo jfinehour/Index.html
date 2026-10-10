@@ -912,12 +912,12 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
       <div class="slider-group">
         <div class="slider-label"><b>Max exposure per player</b><span class="val" id="valExposure">40%</span></div>
         <input type="range" id="sliderExposure" min="10" max="100" value="40">
-        <div class="slider-note">Soft cap on how many of the 20 lineups (per bucket) a single player can appear in. Relaxed automatically if the slate doesn't support it at full quality.</div>
+        <div class="slider-note">Soft cap on how many of the lineups in each bucket a single player can appear in. Relaxed automatically if the slate doesn't support it at full quality.</div>
       </div>
 
       <div class="slider-group">
-        <div class="slider-label"><b>Lineups per GPP bucket</b><span class="val" id="valGppCount">20</span></div>
-        <input type="range" id="sliderGppCount" min="5" max="50" value="20" step="5">
+        <div class="slider-label"><b>Lineups per GPP bucket</b><span class="val" id="valGppCount">40</span></div>
+        <input type="range" id="sliderGppCount" min="5" max="60" value="40" step="5">
         <div class="slider-note">Applies to both Small Field and Large Field buckets.</div>
       </div>
 
@@ -951,9 +951,9 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
 
   <div class="tabbar" id="tabbar">
     <button class="tab active" data-tab="proj">Projection <span class="count">·10</span></button>
-    <button class="tab" data-tab="ceil">Ceiling <span class="count">·5</span></button>
-    <button class="tab" data-tab="small">Small Field <span class="count" id="tabCountSmall">·20</span></button>
-    <button class="tab" data-tab="large">Large Field <span class="count" id="tabCountLarge">·20</span></button>
+    <button class="tab" data-tab="ceil">Ceiling <span class="count">·10</span></button>
+    <button class="tab" data-tab="small">Small Field <span class="count" id="tabCountSmall">·40</span></button>
+    <button class="tab" data-tab="large">Large Field <span class="count" id="tabCountLarge">·40</span></button>
     <button class="tab" data-tab="exposure">Exposure</button>
     <button class="tab" data-tab="simulate">Simulate</button>
   </div>
@@ -2906,7 +2906,7 @@ function buildSyntheticField(players, opts) {
  * buildSyntheticField). Cheap relative to field construction — safe to
  * call once per lineup you want to check, reusing the same field object.
  */
-function simulateContestROI(userLineup, field, opts) {
+function simulateContestROIMulti(userLineups, field, opts) {
   const {
     payoutTable, entryFee, iterations = 300, seed = 1,
     vegasContext = null, teamWeight = 0.35, gameWeightBase = 0.15,
@@ -2918,7 +2918,7 @@ function simulateContestROI(userLineup, field, opts) {
   const { archetypes, archetypeWeights } = field;
 
   // Shared team/game correlation context across user + field.
-  const allLineups = [userLineup, ...archetypes];
+  const allLineups = [...userLineups, ...archetypes];
   const teamOppMap = new Map();
   for (const arr of allLineups) {
     for (const p of arr) {
@@ -2953,8 +2953,9 @@ function simulateContestROI(userLineup, field, opts) {
   // the user's lineup and every field archetype under it, and estimates the
   // user's rank via the cumulative weight of archetypes that out-scored them.
   const rngSim = mulberry32(seed);
-  let totalPayout = 0, cashCount = 0;
-  const ranks = [];
+  const L = userLineups.length;
+  const totalPayout = new Array(L).fill(0), cashCount = new Array(L).fill(0);
+  const ranks = userLineups.map(() => []);
 
   // Every unique player across the user's lineup AND every field archetype,
   // so each real player gets exactly ONE simulated performance per
@@ -2995,31 +2996,48 @@ function simulateContestROI(userLineup, field, opts) {
       return total;
     }
 
-    const userScore = scoreOf(userLineup);
-    let weightAbove = 0;
-    for (let ai = 0; ai < archetypes.length; ai++) {
-      if (scoreOf(archetypes[ai]) >= userScore) weightAbove += archetypeWeights[ai];
+    // Score the whole field ONCE per iteration, then rank every user lineup
+    // against it (shared outcomes, and ~Lx faster than one pass per lineup).
+    const nA = archetypes.length;
+    const fs = new Float64Array(nA);
+    for (let ai = 0; ai < nA; ai++) fs[ai] = scoreOf(archetypes[ai]);
+    const order = Array.from({ length: nA }, (_, i) => i).sort((x, y) => fs[y] - fs[x]);
+    const cum = new Float64Array(nA);
+    let run = 0;
+    for (let k = 0; k < nA; k++) { run += archetypeWeights[order[k]]; cum[k] = run; }
+    for (let li = 0; li < L; li++) {
+      const us = scoreOf(userLineups[li]);
+      // count of archetypes with score >= us (order is descending)
+      let lo = 0, hi = nA;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (fs[order[mid]] >= us) lo = mid + 1; else hi = mid; }
+      const weightAbove = lo > 0 ? cum[lo - 1] : 0;
+      const estRank = Math.max(1, Math.round(weightAbove) + 1);
+      ranks[li].push(estRank);
+      const payout = payoutForRank(estRank, payoutTable);
+      totalPayout[li] += payout;
+      if (payout > 0) cashCount[li]++;
     }
-    const estRank = Math.max(1, Math.round(weightAbove) + 1);
-    ranks.push(estRank);
-    const payout = payoutForRank(estRank, payoutTable);
-    totalPayout += payout;
-    if (payout > 0) cashCount++;
   }
 
-  ranks.sort((a, b) => a - b);
-  const n = ranks.length;
-  const avgPayout = totalPayout / n;
-  return {
-    avgPayout,
-    roiPct: ((avgPayout - entryFee) / entryFee) * 100,
-    cashRatePct: (cashCount / n) * 100,
-    medianRank: ranks[Math.floor(n / 2)],
-    bestRank: ranks[0],
-    worstRank: ranks[n - 1],
-    fieldSampleSize: archetypes.length,
-    iterations: n,
-  };
+  return ranks.map((rk, li) => {
+    rk.sort((x, y) => x - y);
+    const n = rk.length;
+    const avgPayout = totalPayout[li] / n;
+    return {
+      avgPayout,
+      roiPct: ((avgPayout - entryFee) / entryFee) * 100,
+      cashRatePct: (cashCount[li] / n) * 100,
+      medianRank: rk[Math.floor(n / 2)],
+      bestRank: rk[0],
+      worstRank: rk[n - 1],
+      fieldSampleSize: archetypes.length,
+      iterations: n,
+    };
+  });
+}
+
+function simulateContestROI(userLineup, field, opts) {
+  return simulateContestROIMulti([userLineup], field, opts)[0];
 }
 
 /* =====================================================================
@@ -3184,7 +3202,7 @@ const DFSEngine = {
   overlapCount, generateTopN, generateCorrelatedLineups,
   solveExactOptimal, boundedKnapsackTable, convolve, reconstruct, parseVegasLines, swapNeighbors,
   parseOddsApiResponse, nflTeamNameToAbbr, simulateLineups, boxMullerZ, splitNormalFromZ,
-  parsePayoutTable, parseContestEntryCount, payoutForRank, simulateContestROI, buildSyntheticField,
+  parsePayoutTable, parseContestEntryCount, payoutForRank, simulateContestROI, simulateContestROIMulti, buildSyntheticField,
   showdownStructureOk, showdownSplitAllowed, buildShowdownScenarioPool,
   buildFieldArchetype, buildShowdownFieldArchetype, weightedRandomPick,
   solveExactShowdownOptimal, buildShowdownLineup, swapShowdownNeighbors, generateShowdownTopN,
@@ -4180,7 +4198,7 @@ if (typeof window !== "undefined") {
         state.results.proj = eng.generateShowdownTopN(pool, p => p.proj, 10, { attempts: 500, seed: 1, salaryCap });
         setStatus("Generating Ceiling lineups...");
         setTimeout(() => {
-          state.results.ceil = eng.generateShowdownTopN(pool, p => p.ceiling, 5, { attempts: 500, seed: 7, salaryCap });
+          state.results.ceil = eng.generateShowdownTopN(pool, p => p.ceiling, 10, { attempts: 500, seed: 7, salaryCap });
           setStatus("Generating Small Field GPP lineups...");
           setTimeout(() => {
             const n = parseInt(els.sliderGppCount.value, 10);
@@ -4223,7 +4241,7 @@ if (typeof window !== "undefined") {
       state.results.proj = eng.generateTopN(players, p => p.proj, 10, { attempts: 500, seed: 1, flexEligible, salaryCap });
       setStatus("Generating Ceiling lineups...");
       setTimeout(() => {
-        state.results.ceil = eng.generateTopN(players, p => p.ceiling, 5, { attempts: 500, seed: 7, flexEligible, salaryCap });
+        state.results.ceil = eng.generateTopN(players, p => p.ceiling, 10, { attempts: 500, seed: 7, flexEligible, salaryCap });
         setStatus("Generating Small Field GPP lineups...");
         setTimeout(() => {
           const n = parseInt(els.sliderGppCount.value, 10);
@@ -4275,7 +4293,7 @@ if (typeof window !== "undefined") {
 
   function updateTabCounts() {
     document.querySelector('[data-tab="proj"] .count').textContent = "·" + (state.results.proj ? state.results.proj.length : 10);
-    document.querySelector('[data-tab="ceil"] .count').textContent = "·" + (state.results.ceil ? state.results.ceil.length : 5);
+    document.querySelector('[data-tab="ceil"] .count').textContent = "·" + (state.results.ceil ? state.results.ceil.length : 10);
     els.tabCountSmall.textContent = "·" + (state.results.small ? state.results.small.length : els.sliderGppCount.value);
     els.tabCountLarge.textContent = "·" + (state.results.large ? state.results.large.length : els.sliderGppCount.value);
   }
@@ -4536,9 +4554,10 @@ if (typeof window !== "undefined") {
   }
 
   function renderExposureTab() {
+    const posFilter = state.exposurePos || "ALL";
     const buckets = [
       { label: "Projection ×10", data: state.results.proj },
-      { label: "Ceiling ×5", data: state.results.ceil },
+      { label: "Ceiling ×10", data: state.results.ceil },
       { label: "Small Field", data: state.results.small ? state.results.small.map(r => r.arr) : null },
       { label: "Large Field", data: state.results.large ? state.results.large.map(r => r.arr) : null },
     ];
@@ -4558,7 +4577,9 @@ if (typeof window !== "undefined") {
         }
       }
     }
-    const rows = [...exposure.entries()].sort((a, b) => b[1].count - a[1].count);
+    const posOrder = ["QB", "RB", "WR", "TE", "K", "DST"];
+    const posPresent = posOrder.filter(p => [...exposure.values()].some(r => r.position === p));
+    const rows = [...exposure.entries()].filter(([, r]) => posFilter === "ALL" || r.position === posFilter).sort((a, b) => b[1].count - a[1].count);
     const maxCount = rows.length ? rows[0][1].count : 1;
     const body = rows.map(([name, rec]) => {
       const pct = Math.round((rec.count / totalLineups) * 100);
@@ -4572,7 +4593,8 @@ if (typeof window !== "undefined") {
         <td><span class="exp-bar-bg"><span class="exp-bar-fill" style="width:${barPct}%"></span></span></td>
       </tr>`;
     }).join("");
-    return `<div style="overflow-x:auto"><table class="exposure-table">
+    const chips = `<div class="platform-row" style="margin-top:0;">${["ALL", ...posPresent].map(p => `<button type="button" class="platform-chip${posFilter === p ? " selected" : ""}" data-exp-pos="${p}">${p === "ALL" ? "All" : p}</button>`).join("")}</div>`;
+    return chips + `<div style="overflow-x:auto"><table class="exposure-table">
       <thead><tr><th>Player</th><th>Tm</th><th>Pos</th><th>Count</th><th>%</th><th></th></tr></thead>
       <tbody>${body}</tbody>
     </table></div>`;
@@ -4609,6 +4631,7 @@ if (typeof window !== "undefined") {
       }
     } else if (activeTab === "exposure") {
       html = renderExposureTab();
+      setTimeout(() => document.querySelectorAll("[data-exp-pos]").forEach(b => b.addEventListener("click", () => { state.exposurePos = b.dataset.expPos; render(); })), 0);
     } else if (activeTab === "simulate") {
       html = renderSimulateTab();
     }
@@ -4618,7 +4641,7 @@ if (typeof window !== "undefined") {
       html = renderBuildInfoBanner(activeTab) + html;
     }
     els.content.innerHTML = html;
-    if (activeTab === "simulate") wireSimulateTabControls();
+    if (activeTab === "simulate") { wireSimulateTabControls(); wireAttributionControls(); }
   }
 
   function emptyResultNotice(tab) {
@@ -4819,6 +4842,107 @@ if (typeof window !== "undefined") {
       </div>`;
   }
 
+  /* ---------------- Simulation attribution: which players / stacks sim well ---------------- */
+  function lineupStackKeys(arr) {
+    const byTeam = new Map();
+    for (const p of arr) {
+      if (p.position === "DST") continue;
+      const rec = byTeam.get(p.team) || { n: 0, qb: false, opp: p.opp };
+      rec.n++;
+      if (p.position === "QB" && !p.isCaptain || (p.isCaptain && p.position === "QB")) rec.qb = true;
+      byTeam.set(p.team, rec);
+    }
+    const keys = new Set();
+    for (const [t, r] of byTeam) {
+      if (r.n < 2) continue;
+      if (r.qb) keys.add(`${t} QB + ${r.n - 1} teammate${r.n - 1 > 1 ? "s" : ""}`);
+      else keys.add(`${t} ${r.n}-man stack (no QB)`);
+    }
+    for (const [t, r] of byTeam) {
+      const o = byTeam.get(r.opp);
+      if (o && t < r.opp && r.n + o.n >= 3) keys.add(`${t}/${r.opp} game stack (${r.n}-${o.n})`);
+    }
+    return keys;
+  }
+
+  function computeSimAttribution(results) {
+    const N = results.length;
+    const avgAll = results.reduce((s, r) => s + r.result.avgPayout, 0) / N;
+    const cashAll = results.reduce((s, r) => s + r.result.cashRatePct, 0) / N;
+    function build(keyFn) {
+      const m = new Map();
+      results.forEach((r, i) => {
+        for (const k of keyFn(r.arr)) {
+          const rec = m.get(k.key) || { label: k.label, sub: k.sub, idx: [] };
+          rec.idx.push(i);
+          m.set(k.key, rec);
+        }
+      });
+      const rows = [];
+      for (const rec of m.values()) {
+        const n = rec.idx.length;
+        if (n < 2 || n >= N) continue;
+        const inSet = new Set(rec.idx);
+        let wp = 0, wc = 0, op = 0, oc = 0;
+        results.forEach((r, i) => {
+          if (inSet.has(i)) { wp += r.result.avgPayout; wc += r.result.cashRatePct; }
+          else { op += r.result.avgPayout; oc += r.result.cashRatePct; }
+        });
+        rows.push({ label: rec.label, sub: rec.sub, n, avgPayout: wp / n, cash: wc / n, avgPayoutWithout: op / (N - n), cashWithout: oc / (N - n) });
+      }
+      return rows;
+    }
+    const players = build(arr => arr.map(p => ({ key: p.name, label: p.name, sub: `${p.team} ${p.position === "DST" ? "DST" : p.position}` })));
+    const stacks = build(arr => [...lineupStackKeys(arr)].map(k => ({ key: k, label: k, sub: "" })));
+    return { N, avgAll, cashAll, players, stacks };
+  }
+
+  function renderSimAttribution() {
+    const results = state.contestResults;
+    if (!results || results.length < 6) return "";
+    const att = computeSimAttribution(results);
+    const c = state.contestPresets.find(p => p.id === state.activeContestPresetId);
+    const fee = c ? c.entryFee : 1;
+    const view = state.attrView || "players";
+    const sortKey = state.attrSort || "cashDelta";
+    const rows = (view === "players" ? att.players : att.stacks).map(r => ({
+      ...r,
+      roi: ((r.avgPayout - fee) / fee) * 100,
+      roiDelta: ((r.avgPayout - r.avgPayoutWithout) / fee) * 100,
+      cashDelta: r.cash - r.cashWithout,
+    }));
+    const minN = state.attrMinN || 5;
+    const filtered = rows.filter(r => r.n >= minN).sort((a, b) => b[sortKey] - a[sortKey]);
+    const shown = filtered.slice(0, 40);
+    const th = (label, key) => `<th class="sortable-th${sortKey === key ? " active" : ""}" data-attr-sort="${key}">${label}${sortKey === key ? " ▼" : ""}</th>`;
+    const body = shown.map(r => `<tr>
+      <td>${escapeHtml(r.label)}${r.sub ? ` <span style="opacity:.6">${escapeHtml(r.sub)}</span>` : ""}</td>
+      <td class="num">${r.n}</td>
+      <td class="num">${r.roi >= 0 ? "+" : ""}${fmtNum(r.roi)}%</td>
+      <td class="num">${r.roiDelta >= 0 ? "+" : ""}${fmtNum(r.roiDelta)}</td>
+      <td class="num">${fmtNum(r.cash)}%</td>
+      <td class="num">${r.cashDelta >= 0 ? "+" : ""}${fmtNum(r.cashDelta)}</td>
+    </tr>`).join("");
+    return `<div class="sim-intro" style="margin-top:20px;">
+      <b>What's driving the results?</b> For each ${view === "players" ? "player" : "stack"}, this averages the simulated results of every lineup it appears in (<b>ROI %</b>, <b>Cash</b>) and compares them to lineups without it (<b>ΔROI</b> in points of entry fee, <b>ΔCash</b> in percentage points). Across all ${att.N} lineups, the average cash rate is ${fmtNum(att.cashAll)}%.<br><br>
+      <b>Read with care:</b> this is descriptive, not causal. Players come bundled — a QB's lineups share his stack and teammates, and lineups overlap heavily — so a player can look good just because he rides with a good stack, and low-count rows are noise (ROI is extremely top-heavy). Trust rows with a higher lineup count and lean on the Cash columns, which are steadier.
+    </div>
+    <div class="platform-row" style="margin-top:0;">
+      <button type="button" class="platform-chip${view === "players" ? " selected" : ""}" data-attr-view="players">Players</button>
+      <button type="button" class="platform-chip${view === "stacks" ? " selected" : ""}" data-attr-view="stacks">Stacks</button>
+      ${[2, 3, 5, 8].map(n => `<button type="button" class="platform-chip${minN === n ? " selected" : ""}" data-attr-min="${n}">Min ${n} lineups</button>`).join("")}
+    </div>
+    ${shown.length ? `<div style="overflow-x:auto"><table class="sim-table">
+      <thead><tr><th>${view === "players" ? "Player" : "Stack"}</th>${th("Lineups", "n")}${th("Avg ROI", "roi")}${th("ΔROI vs without", "roiDelta")}${th("Avg Cash", "cash")}${th("ΔCash", "cashDelta")}</tr></thead>
+      <tbody>${body}</tbody></table></div>` : `<div class="empty-state">Nothing meets the minimum lineup count — lower it above.</div>`}`;
+  }
+
+  function wireAttributionControls() {
+    document.querySelectorAll("[data-attr-view]").forEach(b => b.addEventListener("click", () => { state.attrView = b.dataset.attrView; render(); }));
+    document.querySelectorAll("[data-attr-min]").forEach(b => b.addEventListener("click", () => { state.attrMinN = parseInt(b.dataset.attrMin, 10); render(); }));
+    document.querySelectorAll("[data-attr-sort]").forEach(h => h.addEventListener("click", () => { state.attrSort = h.dataset.attrSort; render(); }));
+  }
+
   function renderContestROISection() {
     const entries = collectAllLineupsForSim();
     const introHtml = `<div class="sim-intro">
@@ -4896,7 +5020,7 @@ if (typeof window !== "undefined") {
       tableHtml = `<div class="empty-state"><div class="big">Not run yet</div>Load contest details above, then tap "Run Contest ROI".</div>`;
     }
 
-    return introHtml + configHtml + runControlsHtml + tableHtml;
+    return introHtml + configHtml + runControlsHtml + tableHtml + renderSimAttribution();
   }
 
   function wireSimulateTabControls() {
@@ -5067,13 +5191,11 @@ if (typeof window !== "undefined") {
               ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
             });
             contestStatus.textContent = `Field built (${field.archetypes.length} archetypes) — evaluating ${entries.length} lineups...`;
-            const results = entries.map(e => {
-              const result = eng.simulateContestROI(e.arr, field, {
-                payoutTable: c.payoutTable, entryFee: c.entryFee, iterations,
-                vegasContext: state.vegasContext,
-              });
-              return { bucket: e.bucket, rank: e.rank, result };
+            const simOut = eng.simulateContestROIMulti(entries.map(e => e.arr), field, {
+              payoutTable: c.payoutTable, entryFee: c.entryFee, iterations,
+              vegasContext: state.vegasContext,
             });
+            const results = entries.map((e, i) => ({ bucket: e.bucket, rank: e.rank, arr: e.arr, result: simOut[i] }));
             state.contestResults = results;
             contestStatus.textContent = "Done.";
           } catch (err) {
@@ -5121,7 +5243,7 @@ if (typeof window !== "undefined") {
     }
 
     if (state.results.proj) pushBucket("TOP 10 — PROJECTION", state.results.proj, "own");
-    if (state.results.ceil) pushBucket("TOP 5 — CEILING", state.results.ceil, "own");
+    if (state.results.ceil) pushBucket("TOP 10 — CEILING", state.results.ceil, "own");
     if (state.results.small) pushBucket("SMALL FIELD GPP", state.results.small.map(r => r.arr), "own");
     if (state.results.large) pushBucket("LARGE FIELD GPP", state.results.large.map(r => r.arr), "ownLarge");
 

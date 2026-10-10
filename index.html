@@ -2638,11 +2638,45 @@ function ownershipWeightOf(p, ownershipField) {
   return (o != null && !isNaN(o)) ? Math.max(0.05, o) : 0.3;
 }
 
+/** Iteratively adjusts per-player sampling weights so the casual field's
+ * REALIZED ownership matches the projections file. Plain slot-by-slot
+ * sampling by ownership share does not reproduce it — salary limits and
+ * position structure shift the marginals by 10+ points. */
+function calibrateOwnershipWeights(players, opts) {
+  const { rng, ownershipField, salaryCap, flexEligible, salarySlackFrac, herdShare, herdExp, rounds = 6, draws = 2500 } = opts;
+  const w = new Map();
+  for (const p of players) w.set(p.id, ownershipWeightOf(p, ownershipField));
+  for (let r = 0; r < rounds; r++) {
+    const counts = new Map();
+    let n = 0;
+    for (let d = 0; d < draws * 3 && n < draws; d++) {
+      const ce = rng() < herdShare ? herdExp : 1;
+      const arr = buildFieldArchetype(players, { rng, ownershipField, salaryCap, flexEligible, chalkExp: ce, salarySlackFrac, ownWeights: w });
+      if (!arr) continue;
+      n++;
+      for (const p of arr) counts.set(p.id, (counts.get(p.id) || 0) + 1);
+    }
+    if (n === 0) break;
+    for (const p of players) {
+      const own = p[ownershipField];
+      const target = (own != null && !isNaN(own)) ? own / 100 : 0;
+      if (target < 0.0005) continue;
+      const f = Math.max(0.0015, (counts.get(p.id) || 0) / n);
+      const ratio = Math.pow(target / f, 0.7);
+      w.set(p.id, w.get(p.id) * Math.min(2, Math.max(0.5, ratio)));
+    }
+  }
+  return w;
+}
+
 /** Builds one classic-roster synthetic field entrant via true
  * ownership-proportional sampling at every slot (no stack requirement —
  * generic field entrants aren't assumed to stack). */
 function buildFieldArchetype(pool, opts) {
-  const { rng, ownershipField = "ownLarge", salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE } = opts;
+  const { rng, ownershipField = "ownLarge", salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE, chalkExp = 1, salarySlackFrac = null, ownWeights = null } = opts;
+  const ownW = ownWeights
+    ? (p) => Math.pow(ownWeights.get(p.id) || 0.05, chalkExp)
+    : (p) => Math.pow(ownershipWeightOf(p, ownershipField), chalkExp);
   const byPos = { QB: [], RB: [], WR: [], TE: [], DST: [] };
   for (const p of pool) if (byPos[p.position]) byPos[p.position].push(p);
 
@@ -2675,7 +2709,7 @@ function buildFieldArchetype(pool, opts) {
       const minFutureSalary = remaining * 3000;
       const candidates = byPos[pos].filter(p => !used.has(p.id) && p.salary <= salaryLeft - minFutureSalary);
       if (candidates.length === 0) return null;
-      const pick = weightedRandomPick(candidates, p => ownershipWeightOf(p, ownershipField), rng);
+      const pick = weightedRandomPick(candidates, ownW, rng);
       if (!place(pick)) return null;
     }
   }
@@ -2683,9 +2717,10 @@ function buildFieldArchetype(pool, opts) {
     const filledCounts = { QB: 1, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: 0 };
     const remaining = remainingSlotsAfter(filledCounts) - 1;
     const minFutureSalary = remaining * 3000;
-    const flexPool = pool.filter(p => flexEligible.has(p.position) && !used.has(p.id) && p.salary <= salaryLeft - minFutureSalary);
+    const slack = salarySlackFrac != null ? salarySlackFrac * salaryCap : Infinity;
+    const flexPool = pool.filter(p => flexEligible.has(p.position) && !used.has(p.id) && p.salary <= salaryLeft - minFutureSalary && salaryLeft - p.salary <= slack);
     if (flexPool.length === 0) return null;
-    const pick = weightedRandomPick(flexPool, p => ownershipWeightOf(p, ownershipField), rng);
+    const pick = weightedRandomPick(flexPool, ownW, rng);
     if (!place(pick)) return null;
   }
 
@@ -2699,14 +2734,15 @@ function buildFieldArchetype(pool, opts) {
  * lineups (approximated here — not every real entrant may satisfy it,
  * but this keeps field archetypes at least contest-legal). */
 function buildShowdownFieldArchetype(pool, opts) {
-  const { rng, ownershipField = "ownLarge", salaryCap = 50000 } = opts;
+  const { rng, ownershipField = "ownLarge", salaryCap = 50000, chalkExp = 1 } = opts;
+  const ownW = (p) => Math.pow(ownershipWeightOf(p, ownershipField), chalkExp);
   const teams = [...new Set(pool.map(p => p.team))];
   const used = new Set();
   let salaryLeft = salaryCap;
 
   const cptCandidates = pool.filter(p => p.salary * 1.5 <= salaryLeft - 5 * 2000);
   if (cptCandidates.length === 0) return null;
-  const cpt = weightedRandomPick(cptCandidates, p => ownershipWeightOf(p, ownershipField), rng);
+  const cpt = weightedRandomPick(cptCandidates, ownW, rng);
   used.add(cpt.id);
   salaryLeft -= cpt.salary * 1.5;
 
@@ -2723,7 +2759,7 @@ function buildShowdownFieldArchetype(pool, opts) {
       }
     }
     if (candidates.length === 0) return null;
-    const pick = weightedRandomPick(candidates, p => ownershipWeightOf(p, ownershipField), rng);
+    const pick = weightedRandomPick(candidates, ownW, rng);
     used.add(pick.id);
     salaryLeft -= pick.salary;
     flex.push(pick);
@@ -2794,14 +2830,30 @@ function payoutForRank(rank, payoutTable) {
  * than rebuilt per-lineup.
  */
 function buildSyntheticField(players, opts) {
-  const {
+  let {
     totalEntries, fieldSampleSize = 400, seed = 1,
     ownershipField = "ownLarge", isShowdown = false,
     salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE, sharpShare = 0.35,
     consensusShare = 0.15, consensusCount = 8,
+    herdShare = 0.3, herdExp = 2.5, salarySlackFrac = 0.04, calibrate = true, autoScaleConsensus = true,
   } = opts;
 
   if (!totalEntries || totalEntries < 2) throw new Error("Total entries must be at least 2.");
+
+  // Slate chalk concentration: ownership-weighted mean ownership of a
+  // rostered player. Typical NFL main slates sit around 12-15; a slate where
+  // a handful of players soak up most of the attention scores far higher,
+  // and its field duplicates far more. Duplication is scaled up (or down)
+  // from the base setting accordingly.
+  let concOwn = 0, concSum = 0;
+  for (const p of players) {
+    const o = p[ownershipField];
+    if (o != null && !isNaN(o) && o > 0) { concOwn += o * o; concSum += o; }
+  }
+  const concentration = concSum > 0 ? concOwn / concSum : 13;
+  const chalkScale = (autoScaleConsensus && !isShowdown) ? Math.min(3, Math.max(0.5, Math.pow(concentration / 13, 2))) : 1;
+  consensusShare = Math.min(0.45, consensusShare * Math.sqrt(chalkScale));
+  consensusCount = Math.round(consensusCount * Math.max(1, chalkScale));
 
   // "Naive" opponents: sampled independently per slot, proportional to real
   // ownership — approximates the casual majority of entrants. Rather than
@@ -2810,15 +2862,27 @@ function buildSyntheticField(players, opts) {
   // genuinely do converge heavily on the same chalk combinations, and that
   // recurrence rate IS the field's real shape, not noise to discard.
   const rngField = mulberry32((seed * 7919 + 13) >>> 0);
-  const rawDrawTarget = Math.max(1500, fieldSampleSize * 4);
+  // Draw one raw sample per REAL casual entrant (capped for speed), so a
+  // roster that shows up k times in the draws is a roster that k real
+  // entrants plausibly share. Duplicates are kept at their true mass; only
+  // the one-off rosters are thinned (and up-weighted) to fit the archetype
+  // budget. This is what lets a concentrated-ownership slate produce heavy
+  // duplication on its own, instead of a fixed hand-set amount.
+  const totalOtherEntriesEst = Math.max(0, totalEntries - 1);
+  const naiveEntriesEst = totalOtherEntriesEst * (1 - consensusShare) * (1 - sharpShare);
+  const rawDrawTarget = Math.round(Math.min(40000, Math.max(3000, naiveEntriesEst)));
   const archetypeCounts = new Map(); // signature -> { arr, count }
-  const maxAttempts = rawDrawTarget * 3;
+  const maxAttempts = rawDrawTarget * 12;
+  const ownWeights = (!isShowdown && calibrate)
+    ? calibrateOwnershipWeights(players, { rng: rngField, ownershipField, salaryCap, flexEligible, salarySlackFrac, herdShare, herdExp })
+    : null;
   let attempts = 0, draws = 0;
   while (draws < rawDrawTarget && attempts < maxAttempts) {
     attempts++;
+    const chalkExp = rngField() < herdShare ? herdExp : 1;
     const arr = isShowdown
-      ? buildShowdownFieldArchetype(players, { rng: rngField, ownershipField, salaryCap })
-      : buildFieldArchetype(players, { rng: rngField, ownershipField, salaryCap, flexEligible });
+      ? buildShowdownFieldArchetype(players, { rng: rngField, ownershipField, salaryCap, chalkExp })
+      : buildFieldArchetype(players, { rng: rngField, ownershipField, salaryCap, flexEligible, chalkExp, salarySlackFrac, ownWeights });
     if (!arr) continue;
     draws++;
     const sig = isShowdown ? showdownSignature(arr) : signature(arr);
@@ -2830,8 +2894,20 @@ function buildSyntheticField(players, opts) {
     throw new Error("Could not generate a synthetic field from this player pool — check that it has valid Ownership data.");
   }
   const naiveTargetCount = Math.round(fieldSampleSize * (1 - sharpShare));
-  const rankedNaive = [...archetypeCounts.values()].sort((a, b) => b.count - a.count).slice(0, naiveTargetCount);
-  const keptNaiveDraws = rankedNaive.reduce((s, a) => s + a.count, 0);
+  const allNaive = [...archetypeCounts.values()];
+  const dupedNaive = allNaive.filter(a => a.count >= 2).sort((x, y) => y.count - x.count).slice(0, naiveTargetCount);
+  const singleNaive = allNaive.filter(a => a.count === 1);
+  const singlesBudget = Math.max(0, naiveTargetCount - dupedNaive.length);
+  // thin the one-offs with a seeded shuffle
+  for (let i = singleNaive.length - 1; i > 0; i--) {
+    const j = Math.floor(rngField() * (i + 1));
+    const tmp = singleNaive[i]; singleNaive[i] = singleNaive[j]; singleNaive[j] = tmp;
+  }
+  const keptSingles = singleNaive.slice(0, singlesBudget);
+  const rankedNaive = [...dupedNaive, ...keptSingles];
+  const dupedDraws = dupedNaive.reduce((s, a) => s + a.count, 0);
+  const droppedDupDraws = allNaive.filter(a => a.count >= 2).reduce((s, a) => s + a.count, 0) - dupedDraws;
+  const singleDrawsTotal = singleNaive.length + droppedDupDraws; // mass the kept one-offs must represent
 
   // "Sharp" opponents: built with this app's own stacked, leverage-aware GPP
   // engine — approximates the more serious portion of a large field (many
@@ -2886,19 +2962,24 @@ function buildSyntheticField(players, opts) {
   const naiveEntryShare = totalOtherEntries * remainingShare * (1 - sharpShare);
   const sharpEntryShare = totalOtherEntries * remainingShare * sharpShare;
 
-  const decayRatio = 0.55;
+  const decayRatio = 0.8;
   const rawDecayWeights = consensusLineups.map((_, i) => Math.pow(decayRatio, i));
   const rawDecaySum = rawDecayWeights.reduce((a, b) => a + b, 0) || 1;
   const consensusWeights = rawDecayWeights.map(w => (w / rawDecaySum) * consensusEntryShare);
 
-  const archetypes = [...consensusLineups, ...rankedNaive.map(a => a.arr), ...sharpLineups];
+  const archetypes = [...consensusLineups, ...dupedNaive.map(a => a.arr), ...keptSingles.map(a => a.arr), ...sharpLineups];
   const archetypeWeights = [
     ...consensusWeights,
-    ...rankedNaive.map(a => keptNaiveDraws > 0 ? (a.count / keptNaiveDraws) * naiveEntryShare : 0),
+    ...dupedNaive.map(a => (a.count / draws) * naiveEntryShare),
+    ...keptSingles.map(() => keptSingles.length > 0 ? (singleDrawsTotal / draws) * naiveEntryShare / keptSingles.length : 0),
     ...sharpLineups.map(() => sharpLineups.length > 0 ? sharpEntryShare / sharpLineups.length : 0),
   ];
 
-  return { archetypes, archetypeWeights, totalEntries };
+  const topIdx = archetypeWeights.reduce((b, w, i) => (w > archetypeWeights[b] ? i : b), 0);
+  return {
+    archetypes, archetypeWeights, totalEntries,
+    info: { concentration, chalkScale, consensusShareEff: consensusShare, consensusCountEff: consensusCount, topRosterEntries: archetypeWeights[topIdx] || 0 },
+  };
 }
 
 /**
@@ -2969,6 +3050,19 @@ function simulateContestROIMulti(userLineups, field, opts) {
     for (const p of arr) if (!allPlayersById.has(p.id)) allPlayersById.set(p.id, p);
   }
 
+  const uniqIndex = new Map();
+  const uniqP = [];
+  const toIdx = (arr) => Int32Array.from(arr, p => {
+    const key = p.id + (p.isCaptain ? "|C" : "");
+    let k = uniqIndex.get(key);
+    if (k === undefined) { k = uniqP.length; uniqIndex.set(key, k); uniqP.push(p); }
+    return k;
+  });
+  const userIdx = userLineups.map(toIdx);
+  const archIdx = archetypes.map(toIdx);
+  const nU = uniqP.length;
+  const pScore = new Float64Array(nU);
+
   for (let it = 0; it < iterations; it++) {
     const teamShock = new Map();
     for (const t of teams) teamShock.set(t, boxMullerZ(rngSim));
@@ -2977,36 +3071,35 @@ function simulateContestROIMulti(userLineups, field, opts) {
     const playerShock = new Map();
     for (const id of allPlayersById.keys()) playerShock.set(id, boxMullerZ(rngSim));
 
-    function scoreOf(arr) {
-      let total = 0;
-      for (const p of arr) {
-        const game = gameOfTeam.get(p.team);
-        const gw = game ? gameWeightFor(game) : 0;
-        const tw = teamsSet.has(p.team) ? teamWeight : 0;
-        const iw = Math.max(0, 1 - tw - gw);
-        const tShock = teamShock.get(p.team) || 0;
-        const gShock = game ? gameShock.get(game.key) : 0;
-        const iShock = playerShock.get(p.id) || 0;
-        const combinedZ = Math.sqrt(iw) * iShock + Math.sqrt(tw) * tShock + Math.sqrt(gw) * gShock;
-        const floorVal = (p.floor != null && !isNaN(p.floor)) ? p.floor : p.proj * 0.5;
-        let score = splitNormalFromZ(combinedZ, p.proj, floorVal, p.ceiling);
-        if (p.isCaptain) score *= 1.5;
-        total += score;
-      }
-      return total;
+    // Score each UNIQUE player once per iteration, then sum per lineup.
+    for (let k = 0; k < nU; k++) {
+      const p = uniqP[k];
+      const game = gameOfTeam.get(p.team);
+      const gw = game ? gameWeightFor(game) : 0;
+      const tw = teamsSet.has(p.team) ? teamWeight : 0;
+      const iw = Math.max(0, 1 - tw - gw);
+      const tShock = teamShock.get(p.team) || 0;
+      const gShock = game ? gameShock.get(game.key) : 0;
+      const iShock = playerShock.get(p.id) || 0;
+      const combinedZ = Math.sqrt(iw) * iShock + Math.sqrt(tw) * tShock + Math.sqrt(gw) * gShock;
+      const floorVal = (p.floor != null && !isNaN(p.floor)) ? p.floor : p.proj * 0.5;
+      let score = splitNormalFromZ(combinedZ, p.proj, floorVal, p.ceiling);
+      if (p.isCaptain) score *= 1.5;
+      pScore[k] = score;
     }
+    const sumIdx = (idx) => { let tot = 0; for (let q = 0; q < idx.length; q++) tot += pScore[idx[q]]; return tot; };
 
     // Score the whole field ONCE per iteration, then rank every user lineup
     // against it (shared outcomes, and ~Lx faster than one pass per lineup).
     const nA = archetypes.length;
     const fs = new Float64Array(nA);
-    for (let ai = 0; ai < nA; ai++) fs[ai] = scoreOf(archetypes[ai]);
+    for (let ai = 0; ai < nA; ai++) fs[ai] = sumIdx(archIdx[ai]);
     const order = Array.from({ length: nA }, (_, i) => i).sort((x, y) => fs[y] - fs[x]);
     const cum = new Float64Array(nA);
     let run = 0;
     for (let k = 0; k < nA; k++) { run += archetypeWeights[order[k]]; cum[k] = run; }
     for (let li = 0; li < L; li++) {
-      const us = scoreOf(userLineups[li]);
+      const us = sumIdx(userIdx[li]);
       // count of archetypes with score >= us (order is descending)
       let lo = 0, hi = nA;
       while (lo < hi) { const mid = (lo + hi) >> 1; if (fs[order[mid]] >= us) lo = mid + 1; else hi = mid; }
@@ -4981,8 +5074,8 @@ if (typeof window !== "undefined") {
       <div class="slider-note">Share of the field assumed to converge on a small handful of the most obvious, highest-owned builds — not spread independently across hundreds of distinct combinations. This is specifically what makes a very chalky lineup's simulated ROI drop once you account for likely ties: duplicated entries split the payout for the ranks they jointly occupy. Set to 0 to disable and go back to independent sampling only.</div>
     </div>
     <div class="slider-group">
-      <div class="slider-label"><b>Field resolution</b><span class="val" id="valFieldSize">${fieldSizeLabel(state.fieldPct || 18, activePreset.totalEntries)}</span></div>
-      <input type="range" id="sliderFieldSize" min="5" max="40" step="1" value="${state.fieldPct || 18}">
+      <div class="slider-label"><b>Field resolution</b><span class="val" id="valFieldSize">${fieldSizeLabel(state.fieldPct || 35, activePreset.totalEntries)}</span></div>
+      <input type="range" id="sliderFieldSize" min="5" max="60" step="1" value="${state.fieldPct || 35}">
       <div class="slider-note">How many distinct opponent rosters stand in for the real field, as a percent of its entries (kept between ~1,000 and 6,000 archetypes, never more than the number of entries). Too few understates how hard it is to hit the very top spots — testing this directly showed the previous 400-archetype default let lineups reach literal 1st place far too easily, since beating a small sample is mathematically easier than beating 17,000+ real competitors. Higher = more realistic tail, but slower.</div>
     </div>
     <div class="sim-controls">
@@ -5031,7 +5124,12 @@ if (typeof window !== "undefined") {
       tableHtml = `<div class="empty-state"><div class="big">Not run yet</div>Load contest details above, then tap "Run Contest ROI".</div>`;
     }
 
-    return introHtml + configHtml + runControlsHtml + tableHtml + renderSimAttribution();
+    let fieldInfoHtml = "";
+    if (state.fieldInfo && state.contestResults) {
+      const fi = state.fieldInfo;
+      fieldInfoHtml = `<div class="slider-note" style="margin:0 0 10px;"><b>Field assumptions:</b> this slate's ownership concentration is <b>${fi.concentration.toFixed(1)}</b>${state.contestType === "showdown" ? " (Showdown pools are always concentrated, so no slate scaling is applied)" : " (typical main slates run about 12–15; higher means attention is piled on fewer players)"}. Chalk-duplication weight is  <b>${Math.round(fi.consensusShareEff * 100)}%</b> of the field across <b>${fi.consensusCountEff}</b> consensus rosters; the single most-duplicated roster is assumed to be held by about <b>${Math.round(fi.topRosterEntries).toLocaleString()}</b> entries.</div>`;
+    }
+    return introHtml + configHtml + runControlsHtml + fieldInfoHtml + tableHtml + renderSimAttribution();
   }
 
   function wireSimulateTabControls() {
@@ -5201,10 +5299,19 @@ if (typeof window !== "undefined") {
         setTimeout(() => {
           try {
             contestStatus.textContent = "Building synthetic field...";
-            const field = eng.buildSyntheticField(state.generationPool || state.players, {
-              totalEntries: c.totalEntries, fieldSampleSize, seed: 1, sharpShare, consensusShare,
-              ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
-            });
+            const fieldPlayers = state.generationPool || state.players;
+            const fieldKey = [c.totalEntries, fieldSampleSize, sharpShare, consensusShare, isShowdown, getSalaryCap()].join("|");
+            let field;
+            if (state.fieldCache && state.fieldCache.players === fieldPlayers && state.fieldCache.key === fieldKey) {
+              field = state.fieldCache.field; // same inputs as last run — reuse the built field
+            } else {
+              field = eng.buildSyntheticField(fieldPlayers, {
+                totalEntries: c.totalEntries, fieldSampleSize, seed: 1, sharpShare, consensusShare,
+                ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
+              });
+              state.fieldCache = { players: fieldPlayers, key: fieldKey, field };
+            }
+            state.fieldInfo = field.info || null;
             contestStatus.textContent = `Field built (${field.archetypes.length} archetypes) — evaluating ${entries.length} lineups...`;
             const simOut = eng.simulateContestROIMulti(entries.map(e => e.arr), field, {
               payoutTable: c.payoutTable, entryFee: c.entryFee, iterations,

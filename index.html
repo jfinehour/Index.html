@@ -4284,14 +4284,16 @@ if (typeof window !== "undefined") {
         state.generationPool = pool;
         state.buildInfo = { showdown: true, structure: describeStructure(structure), scenarioInfo };
 
+        // Neither structure NOR the game script touches Projection/Ceiling: those
+        // two tabs are always the true optimum under the raw projections.
         // Structure (5-1/4-2/3-3 + team) is a construction preference, the
         // Showdown analog of Classic's Stack Size — it only applies to the
         // GPP tabs below, not here. Projection/Ceiling stay the true
         // unconstrained optimum (still under the game-script pool, if set).
-        state.results.proj = eng.generateShowdownTopN(pool, p => p.proj, 10, { attempts: 500, seed: 1, salaryCap });
+        state.results.proj = eng.generateShowdownTopN(players, p => p.proj, 10, { attempts: 500, seed: 1, salaryCap });
         setStatus("Generating Ceiling lineups...");
         setTimeout(() => {
-          state.results.ceil = eng.generateShowdownTopN(pool, p => p.ceiling, 10, { attempts: 500, seed: 7, salaryCap });
+          state.results.ceil = eng.generateShowdownTopN(players, p => p.ceiling, 10, { attempts: 500, seed: 7, salaryCap });
           setStatus("Generating Small Field GPP lineups...");
           setTimeout(() => {
             const n = parseInt(els.sliderGppCount.value, 10);
@@ -4771,7 +4773,9 @@ if (typeof window !== "undefined") {
     const structureApplies = tab === "small" || tab === "large";
     if (structureApplies && b.structure) parts.push(`<span><b>Structure:</b> ${escapeHtml(b.structure)}</span>`);
     const si = b.scenarioInfo;
-    if (si) {
+    if (si && !structureApplies) {
+      parts.push(`<span style="white-space:normal;">Game script and structure are <b>not applied</b> to this tab — these are the true top lineups under your raw projections.</span>`);
+    } else if (si) {
       const [tA, tB] = si.teams;
       const bits = [];
       if (si.winner) bits.push(`${escapeHtml(si.winner)} wins`);
@@ -4793,8 +4797,13 @@ if (typeof window !== "undefined") {
   function collectAllLineupsForSim() {
     const isShowdown = state.contestType === "showdown";
     const entries = [];
-    if (state.results.proj) state.results.proj.forEach((arr, i) => entries.push({ bucket: "Projection", rank: i + 1, arr }));
-    if (state.results.ceil) state.results.ceil.forEach((arr, i) => entries.push({ bucket: "Ceiling", rank: i + 1, arr }));
+    // Projection/Ceiling are built from raw projections, but every simulation
+    // runs under ONE consistent set of numbers — the (possibly scenario-
+    // conditioned) generation pool the tournament lineups and field use.
+    const poolById = (isShowdown && state.generationPool) ? new Map(state.generationPool.map(p => [p.id, p])) : null;
+    const toSimPool = (arr) => poolById ? arr.map(p => { const q = poolById.get(p.id); return q ? { ...q, isCaptain: p.isCaptain } : p; }) : arr;
+    if (state.results.proj) state.results.proj.forEach((arr, i) => entries.push({ bucket: "Projection", rank: i + 1, arr: toSimPool(arr) }));
+    if (state.results.ceil) state.results.ceil.forEach((arr, i) => entries.push({ bucket: "Ceiling", rank: i + 1, arr: toSimPool(arr) }));
     if (state.results.small) state.results.small.forEach((r, i) => entries.push({ bucket: "Small Field", rank: i + 1, arr: r.arr }));
     if (state.results.large) state.results.large.forEach((r, i) => entries.push({ bucket: "Large Field", rank: i + 1, arr: r.arr }));
     return entries;

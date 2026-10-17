@@ -954,6 +954,7 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
     <button class="tab" data-tab="ceil">Ceiling <span class="count">·10</span></button>
     <button class="tab" data-tab="small">Small Field <span class="count" id="tabCountSmall">·40</span></button>
     <button class="tab" data-tab="large">Large Field <span class="count" id="tabCountLarge">·40</span></button>
+    <button class="tab" data-tab="simbuilt">Sim-Built <span class="count" id="tabCountSim">·0</span></button>
     <button class="tab" data-tab="exposure">Exposure</button>
     <button class="tab" data-tab="simulate">Simulate</button>
   </div>
@@ -3036,6 +3037,10 @@ function simulateContestROIMulti(userLineups, field, opts) {
   const rngSim = mulberry32(seed);
   const L = userLineups.length;
   const totalPayout = new Array(L).fill(0), cashCount = new Array(L).fill(0);
+  const totalPayoutCapped = new Array(L).fill(0);
+  // Robust-ROI cap: any finish better than the field's top 0.1% is paid as if it
+  // landed at exactly 0.1%, so a handful of simulated 1st-place hits can't dominate.
+  const capRank = Math.max(1, Math.round(0.001 * archetypeWeights.reduce((s, w) => s + w, 0)));
   const ranks = userLineups.map(() => []);
 
   // Every unique player across the user's lineup AND every field archetype,
@@ -3108,6 +3113,7 @@ function simulateContestROIMulti(userLineups, field, opts) {
       ranks[li].push(estRank);
       const payout = payoutForRank(estRank, payoutTable);
       totalPayout[li] += payout;
+      totalPayoutCapped[li] += payoutForRank(Math.max(estRank, capRank), payoutTable);
       if (payout > 0) cashCount[li]++;
     }
   }
@@ -3119,6 +3125,7 @@ function simulateContestROIMulti(userLineups, field, opts) {
     return {
       avgPayout,
       roiPct: ((avgPayout - entryFee) / entryFee) * 100,
+      roiCappedPct: ((totalPayoutCapped[li] / n - entryFee) / entryFee) * 100,
       cashRatePct: (cashCount[li] / n) * 100,
       medianRank: rk[Math.floor(n / 2)],
       bestRank: rk[0],
@@ -3979,7 +3986,8 @@ if (typeof window !== "undefined") {
     els.blendWeights.innerHTML = "";
 
     state.players = null;
-    state.results = { proj: null, ceil: null, small: null, large: null };
+    state.results = { proj: null, ceil: null, small: null, large: null, sim: null };
+    state.simBuilt = null;
     state.simResults = null;
     state.contestResults = null;
     state.resultsMeta = { small: null, large: null };
@@ -4240,6 +4248,9 @@ if (typeof window !== "undefined") {
     els.generateBtn.disabled = true;
     els.exportBtn.disabled = true;
     state.simResults = null; // stale relative to newly-generated lineups
+    state.stackScan = null;
+    state.results.sim = null;
+    state.simBuilt = null;
     state.contestResults = null;
     setStatus("Generating Projection lineups...");
     // Chunk the work with setTimeout so the UI can repaint status between stages.
@@ -4391,6 +4402,8 @@ if (typeof window !== "undefined") {
     document.querySelector('[data-tab="ceil"] .count').textContent = "·" + (state.results.ceil ? state.results.ceil.length : 10);
     els.tabCountSmall.textContent = "·" + (state.results.small ? state.results.small.length : els.sliderGppCount.value);
     els.tabCountLarge.textContent = "·" + (state.results.large ? state.results.large.length : els.sliderGppCount.value);
+    const sc = document.getElementById("tabCountSim");
+    if (sc) sc.textContent = "·" + (state.results.sim ? state.results.sim.length : 0);
   }
 
   /* ---------------- Rendering ---------------- */
@@ -4655,6 +4668,7 @@ if (typeof window !== "undefined") {
       { label: "Ceiling ×10", data: state.results.ceil },
       { label: "Small Field", data: state.results.small ? state.results.small.map(r => r.arr) : null },
       { label: "Large Field", data: state.results.large ? state.results.large.map(r => r.arr) : null },
+      { label: "Sim-Built", data: state.results.sim || null },
     ];
     if (buckets.every(b => !b.data)) {
       return `<div class="empty-state"><div class="big">No lineups yet</div>Generate lineups to see exposure.</div>`;
@@ -4724,6 +4738,8 @@ if (typeof window !== "undefined") {
           : state.results.large.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true, ownField: "ownLarge", leverageScore: lineupLeverageScore(r.arr, meta), leverageMeta: meta })).join("");
         html = renderMetricBanner(meta) + cards;
       }
+    } else if (activeTab === "simbuilt") {
+      html = renderSimBuiltTab();
     } else if (activeTab === "exposure") {
       html = renderExposureTab();
       setTimeout(() => document.querySelectorAll("[data-exp-pos]").forEach(b => b.addEventListener("click", () => { state.exposurePos = b.dataset.expPos; render(); })), 0);
@@ -4736,7 +4752,7 @@ if (typeof window !== "undefined") {
       html = renderBuildInfoBanner(activeTab) + html;
     }
     els.content.innerHTML = html;
-    if (activeTab === "simulate") { wireSimulateTabControls(); wireAttributionControls(); }
+    if (activeTab === "simulate") { wireSimulateTabControls(); wireAttributionControls(); wireStackScan(); wireSimBuild(); }
   }
 
   function emptyResultNotice(tab) {
@@ -4806,6 +4822,7 @@ if (typeof window !== "undefined") {
     if (state.results.ceil) state.results.ceil.forEach((arr, i) => entries.push({ bucket: "Ceiling", rank: i + 1, arr: toSimPool(arr) }));
     if (state.results.small) state.results.small.forEach((r, i) => entries.push({ bucket: "Small Field", rank: i + 1, arr: r.arr }));
     if (state.results.large) state.results.large.forEach((r, i) => entries.push({ bucket: "Large Field", rank: i + 1, arr: r.arr }));
+    if (state.results.sim) state.results.sim.forEach((arr, i) => entries.push({ bucket: "Sim-Built", rank: i + 1, arr: toSimPool(arr) }));
     return entries;
   }
 
@@ -5056,6 +5073,398 @@ if (typeof window !== "undefined") {
     return `${pct}% → ${n.toLocaleString()} archetypes (each ≈ ${per < 10 ? per.toFixed(1) : Math.round(per)} entries)`;
   }
 
+  /** Builds (or reuses a cached) synthetic opponent field for the given contest. */
+  function getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown }) {
+    const fieldPlayers = state.generationPool || state.players;
+    const fieldKey = [c.totalEntries, fieldSampleSize, sharpShare, consensusShare, isShowdown, getSalaryCap()].join("|");
+    let field;
+    if (state.fieldCache && state.fieldCache.players === fieldPlayers && state.fieldCache.key === fieldKey) {
+      field = state.fieldCache.field; // same inputs as last run — reuse the built field
+    } else {
+      field = eng.buildSyntheticField(fieldPlayers, {
+        totalEntries: c.totalEntries, fieldSampleSize, seed: 1, sharpShare, consensusShare,
+        ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
+      });
+      state.fieldCache = { players: fieldPlayers, key: fieldKey, field };
+    }
+    state.fieldInfo = field.info || null;
+    return field;
+  }
+
+  /* ---------------- Stack scanner: which stacks sim best, in your lineups or not ---------------- */
+  function lineupMatchesScanRow(arr, row) {
+    const qb = arr.find(p => p.position === "QB");
+    if (!qb || qb.team !== row.team) return false;
+    const mates = arr.filter(p => p.team === row.team && p.position !== "DST").length; // incl. QB
+    if (mates < row.size) return false;
+    if (row.bb) {
+      const oppT = qb.opp ? String(qb.opp).replace("@", "") : null;
+      if (!arr.some(p => p.position !== "DST" && p.team === oppT)) return false;
+    }
+    return true;
+  }
+
+  function runStackScan() {
+    const statusEl = document.getElementById("scanStatus");
+    const btn = document.getElementById("runScanBtn");
+    const c = state.contestPresets.find(p => p.id === state.activeContestPresetId);
+    if (!c || !c.totalEntries || !c.payoutTable || c.entryFee == null) {
+      statusEl.textContent = "Missing contest details — need total entries, entry fee, and a parsed payout table."; statusEl.className = "status-line err"; return;
+    }
+    const sharpSlider = document.getElementById("sliderSharpShare"), consSlider = document.getElementById("sliderConsensusShare");
+    const fieldSlider = document.getElementById("sliderFieldSize"), runsSlider = document.getElementById("sliderContestRuns");
+    const sharpShare = parseInt(sharpSlider.value, 10) / 100, consensusShare = parseInt(consSlider.value, 10) / 100;
+    const fieldSampleSize = resolveFieldSize(parseInt(fieldSlider.value, 10), c.totalEntries);
+    const iterations = parseInt(runsSlider.value, 10);
+    const salaryCap = getSalaryCap();
+    const flexEligible = els.toggleTEFlex.checked ? new Set(["RB", "WR", "TE"]) : new Set(["RB", "WR"]);
+    const minProj = parseFloat(els.sliderMinProj.value);
+    const pool = state.players.filter(p => p.proj >= minProj);
+    const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
+    const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
+    const base = {
+      poolAttempts: 600, seed: 5, ownershipField: "ownLarge", flexEligible, salaryCap, minSalary,
+      ceilingWeight: parseInt(els.sliderCeilingWeight.value, 10) / 100, boosts: state.playerBoosts,
+      ownershipWeight: parseInt(els.sliderLargeOwn.value, 10) / 100, maxExposureFraction: 0.7,
+      secondaryStackSize: 0, tertiaryStackSize: 0, vegasContext: state.vegasContext,
+      maxMainTeam: parseInt(els.sliderMaxMainTeam.value, 10), maxOtherTeam: parseInt(els.sliderMaxOtherTeam.value, 10),
+    };
+    const qbs = pool.filter(p => p.position === "QB");
+    const topQb = Math.max(...qbs.map(p => p.proj), 0);
+    const teams = [...new Set(qbs.filter(p => p.proj >= 0.6 * topQb).map(p => p.team))];
+    if (teams.length === 0) { statusEl.textContent = "No viable QBs found in the pool."; statusEl.className = "status-line err"; return; }
+    btn.disabled = true; statusEl.className = "status-line";
+    const cands = [];
+    let ti = 0;
+    function step() {
+      if (ti < teams.length) {
+        const t = teams[ti];
+        statusEl.textContent = `Building stack lineups… ${t} (${ti + 1}/${teams.length})`;
+        for (const size of [2, 3, 4]) for (const bb of [0, 1]) {
+          try {
+            const r = eng.generateCorrelatedLineups(pool, 6, { ...base, bringBackShare: bb, stackTeams: [t], stackSize: size });
+            if (r.length) cands.push({ team: t, size, bb, lineups: r.map(x => x.arr) });
+          } catch (err) { /* skip infeasible combo */ }
+        }
+        ti++;
+        setTimeout(step, 0);
+        return;
+      }
+      statusEl.textContent = "Simulating all stack lineups against the field…";
+      setTimeout(() => {
+        try {
+          const field = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown: false });
+          const all = cands.flatMap(x => x.lineups);
+          const out = eng.simulateContestROIMulti(all, field, { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations, vegasContext: state.vegasContext });
+          let k = 0;
+          const myLineups = collectAllLineupsForSim().map(e => e.arr);
+          const rows = cands.map(x => {
+            const res = out.slice(k, k + x.lineups.length); k += x.lineups.length;
+            const best = res.reduce((bi, r, i) => (r.cashRatePct > res[bi].cashRatePct ? i : bi), 0);
+            return {
+              team: x.team, size: x.size, bb: x.bb, n: x.lineups.length,
+              cash: res.reduce((s, r) => s + r.cashRatePct, 0) / res.length,
+              roi: res.reduce((s, r) => s + r.roiPct, 0) / res.length,
+              bestLineup: x.lineups[best], bestCash: res[best].cashRatePct, bestRoi: res[best].roiPct,
+              mine: myLineups.filter(l => lineupMatchesScanRow(l, { team: x.team, size: x.size, bb: x.bb })).length,
+            };
+          });
+          const baseline = rows.reduce((s, r) => s + r.cash, 0) / rows.length;
+          state.stackScan = { rows, baseline, total: myLineups.length, lineupCount: all.length };
+        } catch (err) {
+          statusEl.textContent = "Error: " + err.message; statusEl.className = "status-line err";
+        }
+        btn.disabled = false;
+        render();
+      }, 20);
+    }
+    setTimeout(step, 20);
+  }
+
+  function renderStackScanSection() {
+    const isShowdown = state.contestType === "showdown";
+    const head = `<div class="sim-intro" style="margin-top:24px;"><b>Stack scanner — which stacks sim best, whether or not they made your lineups.</b><br><br>
+      For every viable team, this builds a small batch of lineups forced into each stack shape (QB + 1, 2 or 3 teammates, with and without a bring-back), using your current Large Field tuning, then runs them all through the same contest simulation. Each row averages 6 lineups, so you're comparing <i>stack shapes</i>, not single lineups. The last column shows how many of your current lineups already use that shape.<br><br>
+      <b>Read with care:</b> cash rate is the steadier number; ROI% is dominated by rare top-end finishes. A stack that sims well is a stack the projections and correlation model like — not a guarantee the real game cooperates.</div>`;
+    if (isShowdown) return head + `<div class="empty-state">The stack scanner is Classic-only. For Showdown, the Stacks view in "What's driving the results?" above shows how each split (5-1, 4-2, 3-3) simulated.</div>`;
+    if (!state.players || state.players.length === 0) return "";
+    const controls = `<div class="sim-controls"><button type="button" class="btn btn-primary" id="runScanBtn" style="flex:0 0 auto; min-width:160px;">Scan all stacks</button></div><div id="scanStatus" class="status-line" style="padding:0 0 12px;"></div>`;
+    const sc = state.stackScan;
+    if (!sc) return head + controls;
+    const sortKey = state.scanSort || "cash";
+    const showAll = !!state.scanShowAll;
+    const sorted = sc.rows.slice().sort((x, y) => (sortKey === "mine" ? y.mine - x.mine : y[sortKey] - x[sortKey]));
+    const shown = showAll ? sorted : sorted.slice(0, 25);
+    const th = (label, key) => `<th class="sortable-th${sortKey === key ? " active" : ""}" data-scan-sort="${key}">${label}${sortKey === key ? " ▼" : ""}</th>`;
+    const body = shown.map(r => {
+      const names = r.bestLineup.map(p => `${escapeHtml(p.name)} (${escapeHtml(p.team)})`).join(", ");
+      const d = r.cash - sc.baseline;
+      return `<tr>
+        <td>${escapeHtml(r.team)} QB + ${r.size - 1}${r.bb ? " + bring-back" : ""}<details><summary style="cursor:pointer;opacity:.6;font-size:11px;">best lineup</summary><div style="font-size:11px;max-width:420px;white-space:normal;">${names}<br>Cash ${fmtNum(r.bestCash)}% · ROI ${r.bestRoi >= 0 ? "+" : ""}${fmtNum(r.bestRoi)}%</div></details></td>
+        <td class="num">${fmtNum(r.cash)}%</td>
+        <td class="num">${d >= 0 ? "+" : ""}${fmtNum(d)}</td>
+        <td class="num">${r.roi >= 0 ? "+" : ""}${fmtNum(r.roi)}%</td>
+        <td class="num">${r.mine}/${sc.total}</td>
+      </tr>`;
+    }).join("");
+    const table = `<div style="overflow-x:auto"><table class="sim-table">
+      <thead><tr><th>Stack</th>${th("Avg Cash", "cash")}<th>vs scan avg</th>${th("Avg ROI", "roi")}${th("In your lineups", "mine")}</tr></thead>
+      <tbody>${body}</tbody></table></div>
+      <div class="platform-row"><button type="button" class="platform-chip" id="scanToggleAll">${showAll ? "Show top 25" : `Show all ${sc.rows.length}`}</button></div>
+      <div class="slider-note">${sc.rows.length} stack shapes · ${sc.lineupCount} lineups simulated · scan average cash rate ${fmtNum(sc.baseline)}%. "In your lineups" counts lineups with that team's QB, at least that many teammates, and a bring-back if shown.</div>`;
+    return head + controls + table;
+  }
+
+  function wireStackScan() {
+    const b = document.getElementById("runScanBtn");
+    if (b) b.addEventListener("click", runStackScan);
+    document.querySelectorAll("[data-scan-sort]").forEach(h => h.addEventListener("click", () => { state.scanSort = h.dataset.scanSort; render(); }));
+    const t = document.getElementById("scanToggleAll");
+    if (t) t.addEventListener("click", () => { state.scanShowAll = !state.scanShowAll; render(); });
+  }
+
+  /* ---------------- Sim-Built lineups: build from the simulation, not the optimizer ---------------- */
+  function simBuildValid(arr, isShowdown, ctx) {
+    const ids = new Set(arr.map(p => p.id));
+    if (ids.size !== arr.length) return false;
+    if (isShowdown) {
+      if (arr.length !== 6 || arr.filter(p => p.isCaptain).length !== 1) return false;
+      const sal = arr.reduce((s, p) => s + (p.isCaptain ? p.salary * 1.5 : p.salary), 0);
+      if (sal > ctx.salaryCap || sal < ctx.minSalary) return false;
+      if (ctx.teamCount >= 2 && new Set(arr.map(p => p.team)).size < 2) return false;
+      return true;
+    }
+    if (arr.length !== 9) return false;
+    const c = { QB: 0, RB: 0, WR: 0, TE: 0, DST: 0 };
+    for (const p of arr) { if (c[p.position] === undefined) return false; c[p.position]++; }
+    if (c.QB !== 1 || c.DST !== 1 || c.RB < 2 || c.WR < 3 || c.TE < 1) return false;
+    const sur = { RB: c.RB - 2, WR: c.WR - 3, TE: c.TE - 1 };
+    if (sur.RB + sur.WR + sur.TE !== 1) return false;
+    for (const k of ["RB", "WR", "TE"]) if (sur[k] === 1 && !ctx.flexEligible.has(k)) return false;
+    const sal = arr.reduce((s, p) => s + p.salary, 0);
+    if (sal > ctx.salaryCap || sal < ctx.minSalary) return false;
+    const tc = new Map();
+    for (const p of arr) if (p.position !== "DST") tc.set(p.team, (tc.get(p.team) || 0) + 1);
+    const counts = [...tc.values()].sort((x, y) => y - x);
+    if (counts.length && counts[0] > ctx.maxMainTeam) return false;
+    for (let i = 1; i < counts.length; i++) if (counts[i] > ctx.maxOtherTeam) return false;
+    return true;
+  }
+
+  function simBuildNeighbors(arr, isShowdown, poolPlayers, ctx, rng) {
+    const inLineup = new Set(arr.map(p => p.id));
+    const out = [];
+    arr.forEach((p, i) => {
+      let elig = poolPlayers.filter(q => !inLineup.has(q.id) && (isShowdown || q.position === p.position || (ctx.flexEligible.has(q.position) && ctx.flexEligible.has(p.position))));
+      if (elig.length === 0) return;
+      const lev = (q) => q.proj * (1 - 0.5 * ((q.ownLarge || 0) / 100));
+      elig.sort((x, y) => lev(y) - lev(x));
+      const picks = elig.slice(0, 8);
+      const rest = elig.slice(8);
+      for (let k = 0; k < 5 && rest.length; k++) picks.push(rest.splice(Math.floor(rng() * rest.length), 1)[0]);
+      for (const q of picks) {
+        const next = arr.slice();
+        next[i] = isShowdown ? { ...q, isCaptain: !!p.isCaptain } : q;
+        if (simBuildValid(next, isShowdown, ctx)) out.push(next);
+      }
+    });
+    return out;
+  }
+
+  function runSimBuild() {
+    const statusEl = document.getElementById("simBuildStatus");
+    const btn = document.getElementById("runSimBuildBtn");
+    const c = state.contestPresets.find(p => p.id === state.activeContestPresetId);
+    if (!c || !c.totalEntries || !c.payoutTable || c.entryFee == null) {
+      statusEl.textContent = "Missing contest details — need total entries, entry fee, and a parsed payout table."; statusEl.className = "status-line err"; return;
+    }
+    const isShowdown = state.contestType === "showdown";
+    const metric = state.simBuildMetric || "blend";
+    const nTarget = parseInt(document.getElementById("sliderSimBuildCount").value, 10);
+    const sharpShare = parseInt(document.getElementById("sliderSharpShare").value, 10) / 100;
+    const consensusShare = parseInt(document.getElementById("sliderConsensusShare").value, 10) / 100;
+    const fieldSampleSize = resolveFieldSize(parseInt(document.getElementById("sliderFieldSize").value, 10), c.totalEntries);
+    const iterations = parseInt(document.getElementById("sliderContestRuns").value, 10);
+    const salaryCap = getSalaryCap();
+    const flexEligible = els.toggleTEFlex.checked ? new Set(["RB", "WR", "TE"]) : new Set(["RB", "WR"]);
+    const minProj = parseFloat(els.sliderMinProj.value);
+    const basePool = isShowdown ? (state.generationPool || state.players) : state.players;
+    const pool = basePool.filter(p => p.proj >= minProj);
+    const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
+    const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
+    const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
+    const ctx = {
+      salaryCap, minSalary, flexEligible, teamCount: new Set(pool.map(p => p.team)).size,
+      maxMainTeam: parseInt(els.sliderMaxMainTeam.value, 10), maxOtherTeam: parseInt(els.sliderMaxOtherTeam.value, 10),
+    };
+    const baseGen = {
+      poolAttempts: 1500, ownershipField: "ownLarge", salaryCap, minSalary, ceilingWeight: parseInt(els.sliderCeilingWeight.value, 10) / 100,
+      boosts: state.playerBoosts, ownershipWeight: parseInt(els.sliderLargeOwn.value, 10) / 100, maxExposureFraction: 0.7,
+    };
+    const rng = eng.mulberry32(777);
+    const existingRaw = [];
+    ["proj", "ceil"].forEach(k => (state.results[k] || []).forEach(arr => existingRaw.push(arr)));
+    ["small", "large"].forEach(k => (state.results[k] || []).forEach(r => existingRaw.push(r.arr)));
+    const sigOf = (arr) => (isShowdown ? eng.showdownSignature(arr) : eng.signature(arr));
+    const cands = new Map(); // sig -> {arr}
+    const addCand = (arr) => { const s = sigOf(arr); if (!cands.has(s)) cands.set(s, { arr, sig: s }); };
+    const simArr = (arr) => {
+      if (!isShowdown || !state.generationPool) return arr;
+      const byId = new Map(state.generationPool.map(p => [p.id, p]));
+      return arr.map(p => { const q = byId.get(p.id); return q ? { ...q, isCaptain: p.isCaptain } : p; });
+    };
+    btn.disabled = true; statusEl.className = "status-line";
+    const stages = [];
+    stages.push(() => {
+      statusEl.textContent = "Building a broad candidate pool…";
+      existingRaw.forEach(addCand);
+      if (isShowdown) {
+        const gens = [null, { configs: [{ count: 5, team: null }] }, { configs: [{ count: 4, team: null }] }, { configs: [{ count: 3, team: null }] }];
+        gens.forEach((structure, gi) => {
+          eng.generateShowdownCorrelated(pool, gi === 0 ? 120 : 50, { ...baseGen, poolAttempts: 2500, seed: 31 + gi, structure }).forEach(r => addCand(r.arr));
+        });
+      } else {
+        const gcommon = { ...baseGen, flexEligible, vegasContext: state.vegasContext, maxMainTeam: ctx.maxMainTeam, maxOtherTeam: ctx.maxOtherTeam, secondaryStackSize: 0, tertiaryStackSize: 0 };
+        eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31, bringBackShare: 0.5, stackTeams: [], stackSize: 3 }).forEach(r => addCand(r.arr));
+        const qbs = pool.filter(p => p.position === "QB");
+        const topQb = Math.max(...qbs.map(p => p.proj), 0);
+        const teams = [...new Set(qbs.filter(p => p.proj >= 0.6 * topQb).map(p => p.team))];
+        teams.forEach((t, ti) => {
+          for (const size of [2, 3]) for (const bb of [0, 1]) {
+            try { eng.generateCorrelatedLineups(pool, 3, { ...gcommon, poolAttempts: 500, seed: 40 + ti, bringBackShare: bb, stackTeams: [t], stackSize: size }).forEach(r => addCand(r.arr)); } catch (e) { /* skip */ }
+          }
+        });
+      }
+    });
+    let field, scorer, scored = [], simBase;
+    stages.push(() => {
+      statusEl.textContent = `Scoring ${cands.size.toLocaleString()} candidates in the contest simulation…`;
+      field = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown });
+      simBase = { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations, vegasContext: state.vegasContext };
+      const list = [...cands.values()];
+      const res = eng.simulateContestROIMulti(list.map(x => simArr(x.arr)), field, { ...simBase, seed: 101 });
+      list.forEach((x, i) => { x.res = res[i]; });
+      // scorer: z-scores of cash and winsorized ROI over the initial pool
+      const cashs = res.map(r => r.cashRatePct), rois = res.map(r => r.roiPct).sort((x, y) => x - y);
+      const lo = rois[Math.floor(rois.length * 0.05)], hi = rois[Math.floor(rois.length * 0.95)];
+      const clampR = (v) => Math.min(hi, Math.max(lo, v));
+      const stat = (xs) => { const m = xs.reduce((s, v) => s + v, 0) / xs.length; const sd = Math.sqrt(xs.reduce((s, v) => s + (v - m) ** 2, 0) / xs.length) || 1; return { m, sd }; };
+      const sc = stat(cashs), sr = stat(res.map(r => clampR(r.roiPct)));
+      scorer = (r) => {
+        const zc = (r.cashRatePct - sc.m) / sc.sd, zr = (clampR(r.roiCappedPct) - sr.m) / sr.sd;
+        return metric === "cash" ? zc : metric === "roi" ? zr : 0.5 * (zc + zr);
+      };
+      list.forEach(x => { x.score = scorer(x.res); });
+    });
+    for (let round = 1; round <= 2; round++) {
+      stages.push(() => {
+        statusEl.textContent = `Improving the best lineups with simulation-checked player swaps (round ${round}/2)…`;
+        const list = [...cands.values()].sort((x, y) => y.score - x.score).slice(0, 14);
+        const fresh = [];
+        for (const x of list) for (const nb of simBuildNeighbors(x.arr, isShowdown, pool, ctx, rng)) {
+          const s = sigOf(nb);
+          if (!cands.has(s)) { const o = { arr: nb, sig: s }; cands.set(s, o); fresh.push(o); }
+        }
+        if (!fresh.length) return;
+        const res = eng.simulateContestROIMulti(fresh.map(x => simArr(x.arr)), field, { ...simBase, seed: 101 });
+        fresh.forEach((x, i) => { x.res = res[i]; x.score = scorer(res[i]); });
+      });
+    }
+    stages.push(() => {
+      statusEl.textContent = "Selecting a diversified set and re-testing it on fresh simulated slates…";
+      const ranked = [...cands.values()].sort((x, y) => y.score - x.score);
+      const picked = [];
+      const exp = new Map();
+      const sharedMax = isShowdown ? 4 : 6;
+      const pass = (expCap, overlapCap) => {
+        for (const x of ranked) {
+          if (picked.length >= nTarget) break;
+          if (picked.includes(x)) continue;
+          if (x.arr.some(p => (exp.get(p.id) || 0) >= expCap)) continue;
+          const ids = new Set(x.arr.map(p => p.id));
+          if (picked.some(y => y.arr.filter(p => ids.has(p.id)).length > overlapCap)) continue;
+          picked.push(x); x.arr.forEach(p => exp.set(p.id, (exp.get(p.id) || 0) + 1));
+        }
+      };
+      const cap0 = Math.max(1, Math.ceil(expFrac * nTarget));
+      pass(cap0, sharedMax); pass(cap0, sharedMax + 1); pass(Math.ceil(cap0 * 1.3), sharedMax + 2); pass(nTarget, sharedMax + 3);
+      // out-of-sample check: fresh seed, alongside the existing buckets for comparison
+      const base = existingRaw.map(simArr), mine = picked.map(x => simArr(x.arr));
+      const oos = eng.simulateContestROIMulti([...mine, ...base], field, { ...simBase, seed: 202 });
+      const oosMine = oos.slice(0, mine.length), oosBase = oos.slice(mine.length);
+      const avg = (rs, k) => rs.length ? rs.reduce((s, r) => s + r[k], 0) / rs.length : null;
+      // existing buckets split for the comparison table
+      const sizes = [["Projection", (state.results.proj || []).length], ["Ceiling", (state.results.ceil || []).length], ["Small Field", (state.results.small || []).length], ["Large Field", (state.results.large || []).length]];
+      let off = 0; const cmp = [];
+      for (const [name, len] of sizes) { if (len) cmp.push({ name, cash: avg(oosBase.slice(off, off + len), "cashRatePct"), roi: avg(oosBase.slice(off, off + len), "roiPct"), cap: avg(oosBase.slice(off, off + len), "roiCappedPct") }); off += len; }
+      state.results.sim = picked.map(x => x.arr);
+      state.simBuilt = {
+        metric, evaluated: cands.size, count: picked.length,
+        rows: picked.map((x, i) => ({ inCash: x.res.cashRatePct, inRoi: x.res.roiPct, oosCash: oosMine[i].cashRatePct, oosRoi: oosMine[i].roiPct, oosCap: oosMine[i].roiCappedPct })),
+        oosCash: avg(oosMine, "cashRatePct"), oosRoi: avg(oosMine, "roiPct"), oosCap: avg(oosMine, "roiCappedPct"),
+        inCash: avg(picked.map(x => x.res), "cashRatePct"), inRoi: avg(picked.map(x => x.res), "roiPct"), cmp,
+      };
+    });
+    let si = 0;
+    function next() {
+      if (si >= stages.length) {
+        btn.disabled = false; statusEl.textContent = "Done.";
+        updateTabCounts();
+        activeTab = "simbuilt";
+        document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "simbuilt"));
+        render();
+        return;
+      }
+      const stage = stages[si++];
+      setTimeout(() => {
+        try { stage(); } catch (err) { statusEl.textContent = "Error: " + err.message; statusEl.className = "status-line err"; btn.disabled = false; return; }
+        next();
+      }, 20);
+    }
+    next();
+  }
+
+  function renderSimBuildSection() {
+    if (!state.players || state.players.length === 0) return "";
+    const m = state.simBuildMetric || "blend";
+    const chip = (key, label) => `<button type="button" class="platform-chip${m === key ? " selected" : ""}" data-simbuild-metric="${key}">${label}</button>`;
+    return `<div class="sim-intro" style="margin-top:24px;"><b>Build lineups from the simulation instead of the optimizer.</b><br><br>
+      This builds a broad pool of candidate lineups (your existing ones plus fresh stacked and unstacked builds), scores every one in the contest simulation, improves the best with simulation-checked single-player swaps, then picks a diversified set under your exposure cap. The results appear in the <b>Sim-Built</b> tab, with numbers from a <i>separate</i> run on fresh simulated slates — selecting the best of thousands on one run picks partly on luck, so the out-of-sample column is the honest one.</div>
+      <div class="platform-row" style="margin-top:0;">${chip("blend", "Optimize: Blend")}${chip("cash", "Optimize: Cash rate")}${chip("roi", "Optimize: Robust ROI")}</div>
+      <div class="slider-group"><div class="slider-label"><b>Lineups to build</b><span class="val" id="valSimBuildCount">20</span></div>
+        <input type="range" id="sliderSimBuildCount" min="5" max="60" step="5" value="20"></div>
+      <div class="sim-controls"><button type="button" class="btn btn-primary" id="runSimBuildBtn" style="flex:0 0 auto; min-width:200px;">Build sim-optimized lineups</button></div>
+      <div id="simBuildStatus" class="status-line" style="padding:0 0 12px;"></div>`;
+  }
+
+  function wireSimBuild() {
+    const b = document.getElementById("runSimBuildBtn");
+    if (b) b.addEventListener("click", runSimBuild);
+    document.querySelectorAll("[data-simbuild-metric]").forEach(x => x.addEventListener("click", () => { state.simBuildMetric = x.dataset.simbuildMetric; render(); }));
+    const s = document.getElementById("sliderSimBuildCount"), v = document.getElementById("valSimBuildCount");
+    if (s && v) s.addEventListener("input", () => { v.textContent = s.value; });
+  }
+
+  function renderSimBuiltTab() {
+    if (!state.results.sim || !state.simBuilt) {
+      return `<div class="empty-state"><div class="big">Not built yet</div>Open the Simulate tab → Contest ROI and use "Build sim-optimized lineups".</div>`;
+    }
+    const sb = state.simBuilt;
+    const isShowdown = state.contestType === "showdown";
+    const f = (v) => v == null ? "—" : fmtNum(v);
+    const cmpRows = sb.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="num">${f(r.cash)}%</td><td class="num">${r.cap >= 0 ? "+" : ""}${f(r.cap)}%</td><td class="num">${r.roi >= 0 ? "+" : ""}${f(r.roi)}%</td></tr>`).join("");
+    const summary = `<div class="metric-banner"><span><b>Optimized for:</b> ${sb.metric === "cash" ? "cash rate" : sb.metric === "roi" ? "robust ROI" : "blend of cash rate and robust ROI"}</span><span><b>Candidates scored:</b> ${sb.evaluated.toLocaleString()}</span><span><b>Selected:</b> ${sb.count}</span>
+      <span style="white-space:normal;"><b>Out-of-sample</b> (fresh simulated slates): cash ${f(sb.oosCash)}% · ROI ${sb.oosRoi >= 0 ? "+" : ""}${f(sb.oosRoi)}% &nbsp;|&nbsp; <b>In-sample</b> (what picked them): cash ${f(sb.inCash)}% · ROI ${sb.inRoi >= 0 ? "+" : ""}${f(sb.inRoi)}%. The gap between the two is the luck that selection baked in. <b>Robust ROI</b> pays any finish above the field's top 0.1% as if it landed at 0.1%, so a few simulated 1st places can't drive the result; <b>Raw ROI</b> is the uncapped figure. Treat raw ROI on these lineups with suspicion — a lineup built by searching a model finds the model's blind spots as readily as real edges.</span></div>
+      <div style="overflow-x:auto"><table class="sim-table"><thead><tr><th>Same fresh slates, your other buckets</th><th>Avg Cash</th><th>Robust ROI</th><th>Raw ROI</th></tr></thead><tbody>
+        <tr style="font-weight:600"><td>Sim-Built</td><td class="num">${f(sb.oosCash)}%</td><td class="num">${sb.oosCap >= 0 ? "+" : ""}${f(sb.oosCap)}%</td><td class="num">${sb.oosRoi >= 0 ? "+" : ""}${f(sb.oosRoi)}%</td></tr>${cmpRows}</tbody></table></div>`;
+    const cards = state.results.sim.map((arr, i) => {
+      const r = sb.rows[i];
+      const tag = `<div class="slider-note" style="margin:0 0 4px;">Sim-Built #${i + 1} · out-of-sample cash ${f(r.oosCash)}% · robust ROI ${r.oosCap >= 0 ? "+" : ""}${f(r.oosCap)}% (selected at cash ${f(r.inCash)}%)</div>`;
+      return tag + (isShowdown ? renderShowdownLineupCard(arr, i, { ownField: "ownLarge" }) : renderLineupCard(arr, i, { showBadges: true, ownField: "ownLarge" }));
+    }).join("");
+    return summary + cards;
+  }
+
   function renderContestROISection() {
     const entries = collectAllLineupsForSim();
     const introHtml = `<div class="sim-intro">
@@ -5138,7 +5547,7 @@ if (typeof window !== "undefined") {
       const fi = state.fieldInfo;
       fieldInfoHtml = `<div class="slider-note" style="margin:0 0 10px;"><b>Field assumptions:</b> this slate's ownership concentration is <b>${fi.concentration.toFixed(1)}</b>${state.contestType === "showdown" ? " (Showdown pools are always concentrated, so no slate scaling is applied)" : " (typical main slates run about 12–15; higher means attention is piled on fewer players)"}. Chalk-duplication weight is  <b>${Math.round(fi.consensusShareEff * 100)}%</b> of the field across <b>${fi.consensusCountEff}</b> consensus rosters; the single most-duplicated roster is assumed to be held by about <b>${Math.round(fi.topRosterEntries).toLocaleString()}</b> entries.</div>`;
     }
-    return introHtml + configHtml + runControlsHtml + fieldInfoHtml + tableHtml + renderSimAttribution();
+    return introHtml + configHtml + runControlsHtml + fieldInfoHtml + tableHtml + renderSimAttribution() + renderStackScanSection() + renderSimBuildSection();
   }
 
   function wireSimulateTabControls() {
@@ -5308,18 +5717,7 @@ if (typeof window !== "undefined") {
         setTimeout(() => {
           try {
             contestStatus.textContent = "Building synthetic field...";
-            const fieldPlayers = state.generationPool || state.players;
-            const fieldKey = [c.totalEntries, fieldSampleSize, sharpShare, consensusShare, isShowdown, getSalaryCap()].join("|");
-            let field;
-            if (state.fieldCache && state.fieldCache.players === fieldPlayers && state.fieldCache.key === fieldKey) {
-              field = state.fieldCache.field; // same inputs as last run — reuse the built field
-            } else {
-              field = eng.buildSyntheticField(fieldPlayers, {
-                totalEntries: c.totalEntries, fieldSampleSize, seed: 1, sharpShare, consensusShare,
-                ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
-              });
-              state.fieldCache = { players: fieldPlayers, key: fieldKey, field };
-            }
+            const field = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown });
             state.fieldInfo = field.info || null;
             contestStatus.textContent = `Field built (${field.archetypes.length} archetypes) — evaluating ${entries.length} lineups...`;
             const simOut = eng.simulateContestROIMulti(entries.map(e => e.arr), field, {
@@ -5377,6 +5775,7 @@ if (typeof window !== "undefined") {
     if (state.results.ceil) pushBucket("TOP 10 — CEILING", state.results.ceil, "own");
     if (state.results.small) pushBucket("SMALL FIELD GPP", state.results.small.map(r => r.arr), "own");
     if (state.results.large) pushBucket("LARGE FIELD GPP", state.results.large.map(r => r.arr), "ownLarge");
+    if (state.results.sim) pushBucket("SIM-BUILT", state.results.sim, "ownLarge");
 
     const csv = lines.map(row => row.map(csvEscape).join(",")).join("\r\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });

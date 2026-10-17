@@ -3441,7 +3441,7 @@ if (typeof window !== "undefined") {
     contestFormMode: "view", // "view" | "add" | "edit"
     playerBoosts: new Map(), // name -> boost fraction (e.g. 0.05 = +5%), GPP selection only
     contestResults: null,
-    contestSort: { key: "roiPct", dir: "desc" },
+    contestSort: { key: "roiCappedPct", dir: "desc" },
     selectedTeams: new Set(),
     vegasContext: null,
   };
@@ -5390,8 +5390,14 @@ if (typeof window !== "undefined") {
       pass(cap0, sharedMax); pass(cap0, sharedMax + 1); pass(Math.ceil(cap0 * 1.3), sharedMax + 2); pass(nTarget, sharedMax + 3);
       // out-of-sample check: fresh seed, alongside the existing buckets for comparison
       const base = existingRaw.map(simArr), mine = picked.map(x => simArr(x.arr));
-      const oos = eng.simulateContestROIMulti([...mine, ...base], field, { ...simBase, seed: 202 });
-      const oosMine = oos.slice(0, mine.length), oosBase = oos.slice(mine.length);
+      // Validate on fresh slates with 3x the runs (less noise), then ORDER the picks by that
+      // validated score — the selection-time ranking carries luck from the search itself.
+      const oos = eng.simulateContestROIMulti([...mine, ...base], field, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 });
+      let oosMine = oos.slice(0, mine.length);
+      const oosBase = oos.slice(mine.length);
+      const order = picked.map((_, i) => i).sort((i, j) => scorer(oosMine[j]) - scorer(oosMine[i]));
+      picked.splice(0, picked.length, ...order.map(i => picked[i]));
+      oosMine = order.map(i => oosMine[i]);
       const avg = (rs, k) => rs.length ? rs.reduce((s, r) => s + r[k], 0) / rs.length : null;
       // existing buckets split for the comparison table
       const sizes = [["Projection", (state.results.proj || []).length], ["Ceiling", (state.results.ceil || []).length], ["Small Field", (state.results.small || []).length], ["Large Field", (state.results.large || []).length]];
@@ -5454,7 +5460,7 @@ if (typeof window !== "undefined") {
     const f = (v) => v == null ? "—" : fmtNum(v);
     const cmpRows = sb.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="num">${f(r.cash)}%</td><td class="num">${r.cap >= 0 ? "+" : ""}${f(r.cap)}%</td><td class="num">${r.roi >= 0 ? "+" : ""}${f(r.roi)}%</td></tr>`).join("");
     const summary = `<div class="metric-banner"><span><b>Optimized for:</b> ${sb.metric === "cash" ? "cash rate" : sb.metric === "roi" ? "robust ROI" : "blend of cash rate and robust ROI"}</span><span><b>Candidates scored:</b> ${sb.evaluated.toLocaleString()}</span><span><b>Selected:</b> ${sb.count}</span>
-      <span style="white-space:normal;"><b>Out-of-sample</b> (fresh simulated slates): cash ${f(sb.oosCash)}% · ROI ${sb.oosRoi >= 0 ? "+" : ""}${f(sb.oosRoi)}% &nbsp;|&nbsp; <b>In-sample</b> (what picked them): cash ${f(sb.inCash)}% · ROI ${sb.inRoi >= 0 ? "+" : ""}${f(sb.inRoi)}%. The gap between the two is the luck that selection baked in. <b>Robust ROI</b> pays any finish above the field's top 0.1% as if it landed at 0.1%, so a few simulated 1st places can't drive the result; <b>Raw ROI</b> is the uncapped figure. Treat raw ROI on these lineups with suspicion — a lineup built by searching a model finds the model's blind spots as readily as real edges.</span></div>
+      <span style="white-space:normal;"><b>Out-of-sample</b> (fresh simulated slates, 3× the runs; lineups below are ordered by this): cash ${f(sb.oosCash)}% · ROI ${sb.oosRoi >= 0 ? "+" : ""}${f(sb.oosRoi)}% &nbsp;|&nbsp; <b>In-sample</b> (what picked them): cash ${f(sb.inCash)}% · ROI ${sb.inRoi >= 0 ? "+" : ""}${f(sb.inRoi)}%. The gap between the two is the luck that selection baked in. <b>Robust ROI</b> pays any finish above the field's top 0.1% as if it landed at 0.1%, so a few simulated 1st places can't drive the result; <b>Raw ROI</b> is the uncapped figure. Treat raw ROI on these lineups with suspicion — a lineup built by searching a model finds the model's blind spots as readily as real edges.</span></div>
       <div style="overflow-x:auto"><table class="sim-table"><thead><tr><th>Same fresh slates, your other buckets</th><th>Avg Cash</th><th>Robust ROI</th><th>Raw ROI</th></tr></thead><tbody>
         <tr style="font-weight:600"><td>Sim-Built</td><td class="num">${f(sb.oosCash)}%</td><td class="num">${sb.oosCap >= 0 ? "+" : ""}${f(sb.oosCap)}%</td><td class="num">${sb.oosRoi >= 0 ? "+" : ""}${f(sb.oosRoi)}%</td></tr>${cmpRows}</tbody></table></div>`;
     const cards = state.results.sim.map((arr, i) => {
@@ -5517,6 +5523,7 @@ if (typeof window !== "undefined") {
         const roiClass = res.roiPct >= 0 ? "" : ' style="color:var(--rust);"';
         return `<tr>
           <td class="bucket-label">${escapeHtml(r.bucket)} #${r.rank}</td>
+          <td class="num"${res.roiCappedPct >= 0 ? "" : ' style="color:var(--rust);"'}>${res.roiCappedPct >= 0 ? "+" : ""}${fmtNum(res.roiCappedPct)}%</td>
           <td class="num"${roiClass}>${res.roiPct >= 0 ? "+" : ""}${fmtNum(res.roiPct)}%</td>
           <td class="num">${fmtNum(res.cashRatePct)}%</td>
           <td class="num">${res.medianRank.toLocaleString()}</td>
@@ -5531,7 +5538,8 @@ if (typeof window !== "undefined") {
       tableHtml = `<div style="overflow-x:auto"><table class="sim-table">
         <thead><tr>
           <th>Lineup</th>
-          ${th("ROI %", "roiPct")}
+          ${th("Robust ROI", "roiCappedPct")}
+          ${th("Raw ROI %", "roiPct")}
           ${th("Cash Rate", "cashRatePct")}
           ${th("Median Rank", "medianRank")}
           ${th("Best Rank", "bestRank")}

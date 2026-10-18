@@ -2651,7 +2651,7 @@ function ownershipWeightOf(p, ownershipField) {
  * sampling by ownership share does not reproduce it — salary limits and
  * position structure shift the marginals by 10+ points. */
 function calibrateOwnershipWeights(players, opts) {
-  const { rng, ownershipField, salaryCap, flexEligible, salarySlackFrac, herdShare, herdExp, rounds = 6, draws = 2500 } = opts;
+  const { rng, ownershipField, salaryCap, flexEligible, salarySlackFrac, herdShare, herdExp, stackRate = 0, rounds = 6, draws = 2500 } = opts;
   const w = new Map();
   for (const p of players) w.set(p.id, ownershipWeightOf(p, ownershipField));
   for (let r = 0; r < rounds; r++) {
@@ -2659,7 +2659,7 @@ function calibrateOwnershipWeights(players, opts) {
     let n = 0;
     for (let d = 0; d < draws * 3 && n < draws; d++) {
       const ce = rng() < herdShare ? herdExp : 1;
-      const arr = buildFieldArchetype(players, { rng, ownershipField, salaryCap, flexEligible, chalkExp: ce, salarySlackFrac, ownWeights: w });
+      const arr = buildFieldArchetype(players, { rng, ownershipField, salaryCap, flexEligible, chalkExp: ce, salarySlackFrac, ownWeights: w, stackRate });
       if (!arr) continue;
       n++;
       for (const p of arr) counts.set(p.id, (counts.get(p.id) || 0) + 1);
@@ -2681,7 +2681,7 @@ function calibrateOwnershipWeights(players, opts) {
  * ownership-proportional sampling at every slot (no stack requirement —
  * generic field entrants aren't assumed to stack). */
 function buildFieldArchetype(pool, opts) {
-  const { rng, ownershipField = "ownLarge", salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE, chalkExp = 1, salarySlackFrac = null, ownWeights = null } = opts;
+  const { rng, ownershipField = "ownLarge", salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE, chalkExp = 1, salarySlackFrac = null, ownWeights = null, stackRate = 0 } = opts;
   const ownW = ownWeights
     ? (p) => Math.pow(ownWeights.get(p.id) || 0.05, chalkExp)
     : (p) => Math.pow(ownershipWeightOf(p, ownershipField), chalkExp);
@@ -2710,6 +2710,30 @@ function buildFieldArchetype(pool, opts) {
   const order = [
     ["QB", 1], ["RB", 2], ["WR", 3], ["TE", 1], ["DST", 1],
   ];
+  // Real entrants overwhelmingly pair their QB with a teammate (most GPP
+  // lineups carry QB+1 or more, plus an occasional bring-back). Without this the
+  // field is almost uncorrelated and any stacked lineup looks far better against
+  // it than it really is, especially on the popular stacks.
+  const fieldStackOn = stackRate > 0;
+  const qbPick = weightedRandomPick(byPos.QB.filter(p => p.salary <= salaryCap - 8 * 3000), ownW, rng);
+  if (!qbPick || !place(qbPick)) return null;
+  if (fieldStackOn) {
+    const u = rng();
+    const k = u < 1 - stackRate ? 0 : u < 1 - stackRate + stackRate * 0.55 ? 1 : u < 1 - stackRate + stackRate * 0.9 ? 2 : 3;
+    const wantBB = k >= 1 && rng() < 0.3;
+    const grab = (teamMatch, want) => {
+      for (let g = 0; g < want; g++) {
+        const cands = pool.filter(p => teamMatch(p) && p.position !== "QB" && p.position !== "DST" && !used.has(p.id) &&
+          (slots[p.position].length < ROSTER_SLOTS[p.position] || (flexEligible.has(p.position) && !flexUsed)) &&
+          p.salary <= salaryLeft - 3000 * 6);
+        if (!cands.length) return;
+        const pk = weightedRandomPick(cands, ownW, rng);
+        if (!pk || !place(pk)) return;
+      }
+    };
+    grab(p => p.team === qbPick.team, k);
+    if (wantBB) grab(p => p.team === oppTeam(qbPick) && p.team !== qbPick.team, 1);
+  }
   for (const [pos, count] of order) {
     for (let i = slots[pos].length; i < count; i++) {
       const filledCounts = { QB: slots.QB.length, RB: slots.RB.length, WR: slots.WR.length, TE: slots.TE.length, DST: slots.DST.length, FLEX: flexUsed ? 1 : 0 };
@@ -2843,7 +2867,7 @@ function buildSyntheticField(players, opts) {
     ownershipField = "ownLarge", isShowdown = false,
     salaryCap = SALARY_CAP, flexEligible = FLEX_ELIGIBLE, sharpShare = 0.35,
     consensusShare = 0.15, consensusCount = 8,
-    herdShare = 0.3, herdExp = 2.5, salarySlackFrac = 0.04, calibrate = true, autoScaleConsensus = true,
+    herdShare = 0.3, herdExp = 2.5, salarySlackFrac = 0.04, calibrate = true, autoScaleConsensus = true, fieldStackRate = 0.62, rakeOwnership = false,
   } = opts;
 
   if (!totalEntries || totalEntries < 2) throw new Error("Total entries must be at least 2.");
@@ -2882,7 +2906,7 @@ function buildSyntheticField(players, opts) {
   const archetypeCounts = new Map(); // signature -> { arr, count }
   const maxAttempts = rawDrawTarget * 12;
   const ownWeights = (!isShowdown && calibrate)
-    ? calibrateOwnershipWeights(players, { rng: rngField, ownershipField, salaryCap, flexEligible, salarySlackFrac, herdShare, herdExp })
+    ? calibrateOwnershipWeights(players, { rng: rngField, ownershipField, salaryCap, flexEligible, salarySlackFrac, herdShare, herdExp, stackRate: fieldStackRate })
     : null;
   let attempts = 0, draws = 0;
   while (draws < rawDrawTarget && attempts < maxAttempts) {
@@ -2890,7 +2914,7 @@ function buildSyntheticField(players, opts) {
     const chalkExp = rngField() < herdShare ? herdExp : 1;
     const arr = isShowdown
       ? buildShowdownFieldArchetype(players, { rng: rngField, ownershipField, salaryCap, chalkExp })
-      : buildFieldArchetype(players, { rng: rngField, ownershipField, salaryCap, flexEligible, chalkExp, salarySlackFrac, ownWeights });
+      : buildFieldArchetype(players, { rng: rngField, ownershipField, salaryCap, flexEligible, chalkExp, salarySlackFrac, ownWeights, stackRate: fieldStackRate });
     if (!arr) continue;
     draws++;
     const sig = isShowdown ? showdownSignature(arr) : signature(arr);
@@ -2983,6 +3007,38 @@ function buildSyntheticField(players, opts) {
     ...sharpLineups.map(() => sharpLineups.length > 0 ? sharpEntryShare / sharpLineups.length : 0),
   ];
 
+  // Final fidelity pass. The sharp and consensus layers lean on the best-projected
+  // players, so stacked on top of the casual layer they push popular players well
+  // above their published ownership (e.g. a 28% play landing near 45%). The
+  // published number already is the whole field, sharp entrants included, so rake
+  // the combined weights back to it. Duplication structure is untouched (a roster
+  // keeps its own mass, only scaled), and total entries stay fixed.
+  if (rakeOwnership && !isShowdown) {
+    const W0 = archetypeWeights.reduce((a, b) => a + b, 0);
+    const tgt = new Map();
+    for (const p of players) { const o = p[ownershipField]; if (o != null && !isNaN(o) && o >= 0.5) tgt.set(p.id, o / 100); }
+    const idxs = archetypes.map(a => a.filter(p => tgt.has(p.id)).map(p => p.id));
+    const mult = new Float64Array(archetypes.length).fill(1);
+    for (let it = 0; it < 60; it++) {
+      const real = new Map();
+      let W = 0;
+      for (let i = 0; i < archetypes.length; i++) {
+        const w = archetypeWeights[i] * mult[i]; W += w;
+        for (const id of idxs[i]) real.set(id, (real.get(id) || 0) + w);
+      }
+      const adj = new Map();
+      for (const [id, t] of tgt) adj.set(id, Math.log(Math.min(2, Math.max(0.5, t / Math.max(1e-4, (real.get(id) || 0) / W)))));
+      for (let i = 0; i < archetypes.length; i++) {
+        let s2 = 0;
+        for (const id of idxs[i]) s2 += adj.get(id);
+        mult[i] = Math.min(8, Math.max(0.125, mult[i] * Math.exp(0.22 * s2)));
+      }
+    }
+    let Wn = 0;
+    for (let i = 0; i < archetypes.length; i++) Wn += archetypeWeights[i] * mult[i];
+    for (let i = 0; i < archetypes.length; i++) archetypeWeights[i] = archetypeWeights[i] * mult[i] * (W0 / Wn);
+  }
+
   const topIdx = archetypeWeights.reduce((b, w, i) => (w > archetypeWeights[b] ? i : b), 0);
   return {
     archetypes, archetypeWeights, totalEntries,
@@ -3072,6 +3128,42 @@ function simulateContestROIMulti(userLineups, field, opts) {
   });
   const userIdx = userLineups.map(toIdx);
   const archIdx = archetypes.map(toIdx);
+  // Exact-duplicate handling: if a user lineup is the same roster as a field
+  // archetype carrying w entrants, they all finish tied and split the prizes for the
+  // ranks they jointly occupy (the user is one of w+1). Without this a duplicated
+  // roster either lands below every copy of itself or above all of them depending
+  // on floating-point noise.
+  const sigFn = (arr) => (arr.some(p => p.isCaptain) ? showdownSignature(arr) : signature(arr));
+  const archBySig = new Map();
+  archetypes.forEach((a, i) => { const k = sigFn(a); if (!archBySig.has(k)) archBySig.set(k, i); });
+  const dupOf = userLineups.map(u => { const i = archBySig.get(sigFn(u)); return i === undefined ? -1 : i; });
+  const sumRange = (r0, r1, floorRank) => { // total payout over ranks r0..r1 (inclusive), ranks below floorRank paid as floorRank
+    let tot = 0;
+    for (const row of payoutTable) {
+      const lo = Math.max(r0, row.start), hi = Math.min(r1, row.end);
+      if (hi >= lo) tot += (hi - lo + 1) * row.payout;
+    }
+    if (floorRank > 1 && r0 < floorRank) {
+      // replace the part of the range above the floor with floor-rank payouts
+      const hiCap = Math.min(r1, floorRank - 1);
+      let part = 0;
+      for (const row of payoutTable) {
+        const lo = Math.max(r0, row.start), hi = Math.min(hiCap, row.end);
+        if (hi >= lo) part += (hi - lo + 1) * row.payout;
+      }
+      tot = tot - part + (hiCap - r0 + 1) * payoutForRank(floorRank, payoutTable);
+    }
+    return tot;
+  };
+  const cashRange = (r0, r1) => {
+    let n = 0;
+    for (const row of payoutTable) {
+      if (row.payout <= 0) continue;
+      const lo = Math.max(r0, row.start), hi = Math.min(r1, row.end);
+      if (hi >= lo) n += hi - lo + 1;
+    }
+    return n;
+  };
   const nU = uniqP.length;
   const pScore = new Float64Array(nU);
 
@@ -3111,11 +3203,24 @@ function simulateContestROIMulti(userLineups, field, opts) {
     let run = 0;
     for (let k = 0; k < nA; k++) { run += archetypeWeights[order[k]]; cum[k] = run; }
     for (let li = 0; li < L; li++) {
-      const us = sumIdx(userIdx[li]);
+      const dupI = dupOf[li];
+      const us = dupI >= 0 ? fs[dupI] : sumIdx(userIdx[li]);
       // count of archetypes with score >= us (order is descending)
       let lo = 0, hi = nA;
       while (lo < hi) { const mid = (lo + hi) >> 1; if (fs[order[mid]] >= us) lo = mid + 1; else hi = mid; }
-      const weightAbove = lo > 0 ? cum[lo - 1] : 0;
+      let weightAbove = lo > 0 ? cum[lo - 1] : 0;
+      if (dupI >= 0) {
+        // remove the identical roster (and any exact-score ties with it) from "above"; it ties with the user instead
+        weightAbove -= archetypeWeights[dupI];
+        const g = Math.max(1, Math.round(archetypeWeights[dupI]) + 1);
+        const r0 = Math.max(1, Math.round(weightAbove) + 1), r1 = r0 + g - 1;
+        ranks[li].push(r0 + (g >> 1));
+        const pay = sumRange(r0, r1, 1) / g;
+        totalPayout[li] += pay;
+        totalPayoutCapped[li] += sumRange(r0, r1, capRank) / g;
+        cashCount[li] += cashRange(r0, r1) / g;
+        continue;
+      }
       const estRank = Math.max(1, Math.round(weightAbove) + 1);
       ranks[li].push(estRank);
       const payout = payoutForRank(estRank, payoutTable);
@@ -5170,7 +5275,8 @@ if (typeof window !== "undefined") {
           const all = cands.flatMap(x => x.lineups);
           const out = eng.simulateContestROIMulti(all, field, { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations, vegasContext: state.vegasContext });
           let k = 0;
-          const myLineups = collectAllLineupsForSim().filter(e => e.bucket !== "Sim-Built").map(e => e.arr);
+          const myEntries = collectAllLineupsForSim().filter(e => e.bucket !== "Sim-Built");
+          const myLineups = myEntries.map(e => e.arr);
           const rows = cands.map(x => {
             const res = out.slice(k, k + x.lineups.length); k += x.lineups.length;
             const best = res.reduce((bi, r, i) => (r.cashRatePct > res[bi].cashRatePct ? i : bi), 0);
@@ -5180,6 +5286,7 @@ if (typeof window !== "undefined") {
               roi: res.reduce((s, r) => s + r.roiPct, 0) / res.length,
               bestLineup: x.lineups[best], bestCash: res[best].cashRatePct, bestRoi: res[best].roiPct,
               mine: myLineups.filter(l => lineupMatchesScanRow(l, { team: x.team, size: x.size, bb: x.bb })).length,
+              mineRefs: myEntries.filter(e => lineupMatchesScanRow(e.arr, { team: x.team, size: x.size, bb: x.bb })).map(e => `${e.bucket}|${e.rank}`),
             };
           });
           const baseline = rows.reduce((s, r) => s + r.cash, 0) / rows.length;
@@ -5210,14 +5317,15 @@ if (typeof window !== "undefined") {
     const shown = showAll ? sorted : sorted.slice(0, 25);
     const th = (label, key) => `<th class="sortable-th${sortKey === key ? " active" : ""}" data-scan-sort="${key}">${label}${sortKey === key ? " ▼" : ""}</th>`;
     const body = shown.map(r => {
+      const ri = sc.rows.indexOf(r);
       const names = r.bestLineup.map(p => `${escapeHtml(p.name)} (${escapeHtml(p.team)})`).join(", ");
       const d = r.cash - sc.baseline;
       return `<tr>
-        <td>${escapeHtml(r.team)} QB + ${r.size - 1}${r.bb ? " + bring-back" : ""}<details><summary style="cursor:pointer;opacity:.6;font-size:11px;">best lineup</summary><div style="font-size:11px;max-width:420px;white-space:normal;">${names}<br>Cash ${fmtNum(r.bestCash)}% · ROI ${r.bestRoi >= 0 ? "+" : ""}${fmtNum(r.bestRoi)}%</div></details></td>
+        <td>${escapeHtml(r.team)} QB + ${r.size - 1}${r.bb ? " + bring-back" : ""}<details><summary style="cursor:pointer;opacity:.6;font-size:11px;">best lineup</summary><a href="#" class="lineup-link" data-lineup-ref="Scan|${ri}" style="font-size:11px;">open full lineup</a><br><div style="font-size:11px;max-width:420px;white-space:normal;">${names}<br>Cash ${fmtNum(r.bestCash)}% · ROI ${r.bestRoi >= 0 ? "+" : ""}${fmtNum(r.bestRoi)}%</div></details></td>
         <td class="num">${fmtNum(r.cash)}%</td>
         <td class="num">${d >= 0 ? "+" : ""}${fmtNum(d)}</td>
         <td class="num">${r.roi >= 0 ? "+" : ""}${fmtNum(r.roi)}%</td>
-        <td class="num">${r.mine}/${sc.total}</td>
+        <td class="num">${r.mine}/${sc.total}${r.mineRefs && r.mineRefs.length ? `<details><summary style="cursor:pointer;opacity:.6;font-size:11px;">show</summary><div style="font-size:12px;white-space:normal;text-align:left;">${r.mineRefs.map(ref => `<a href="#" class="lineup-link" data-lineup-ref="${escapeHtml(ref)}">${escapeHtml(ref.replace("|", " #"))}</a>`).join("<br>")}</div></details>` : ""}</td>
       </tr>`;
     }).join("");
     const table = `<div style="overflow-x:auto"><table class="sim-table">
@@ -5449,7 +5557,9 @@ if (typeof window !== "undefined") {
 
   /* ---------------- Click a lineup name in any results table -> popup with that lineup ---------------- */
   function lookupLineup(ref) {
-    const [bucket, rankStr] = ref.split("|"); const i = parseInt(rankStr, 10) - 1;
+    const [bucket, rankStr] = ref.split("|");
+    if (bucket === "Scan") { const row = state.stackScan && state.stackScan.rows[parseInt(rankStr, 10)]; return row ? { arr: row.bestLineup, field: "ownLarge" } : null; }
+    const i = parseInt(rankStr, 10) - 1;
     const R = state.results;
     const src = { "Projection": R.proj, "Ceiling": R.ceil, "Small Field": R.small, "Large Field": R.large, "Sim-Built": R.sim }[bucket];
     const item = src && src[i];
@@ -5468,7 +5578,7 @@ if (typeof window !== "undefined") {
       const card = isSd ? renderShowdownLineupCard(found.arr, 0, { ownField: found.field }) : renderLineupCard(found.arr, 0, { showBadges: true, ownField: found.field });
       const m = document.createElement("div");
       m.id = "lineupModal"; m.className = "lineup-modal";
-      m.innerHTML = `<div class="lineup-modal-box"><button type="button" class="lineup-modal-close" aria-label="Close">×</button><div class="slider-note" style="margin:0 0 6px;"><b>${escapeHtml(ref.replace("|", " #"))}</b></div>${card}</div>`;
+      m.innerHTML = `<div class="lineup-modal-box"><button type="button" class="lineup-modal-close" aria-label="Close">×</button><div class="slider-note" style="margin:0 0 6px;"><b>${escapeHtml(ref.startsWith("Scan|") ? "Best lineup for this stack" : ref.replace("|", " #"))}</b></div>${card}</div>`;
       document.body.appendChild(m);
       return;
     }

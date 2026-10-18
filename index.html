@@ -721,6 +721,12 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
 
 .mode-chip.chip-disabled, .mode-chip:disabled { opacity: 0.4; cursor: not-allowed; }
 
+
+.lineup-link { color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; cursor: pointer; font-weight: 600; }
+.lineup-link:hover { text-decoration-style: solid; }
+.lineup-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1000; display: flex; align-items: flex-start; justify-content: center; padding: 5vh 12px; overflow-y: auto; }
+.lineup-modal-box { position: relative; background: var(--bg-panel, #0D1A3D); color: inherit; border-radius: 12px; padding: 16px; width: 100%; max-width: 560px; box-shadow: 0 10px 40px rgba(0,0,0,0.4); }
+.lineup-modal-close { position: absolute; top: 6px; right: 10px; background: none; border: 0; font-size: 26px; line-height: 1; cursor: pointer; color: inherit; }
 </style>
 </head>
 <body>
@@ -4875,7 +4881,7 @@ if (typeof window !== "undefined") {
         const widthPct = ((s.p90 - s.p10) / globalMax) * 100;
         const medianPct = (s.median / globalMax) * 100;
         return `<tr>
-          <td class="bucket-label">${escapeHtml(r.bucket)} #${r.rank}</td>
+          <td class="bucket-label"><a href="#" class="lineup-link" data-lineup-ref="${escapeHtml(r.bucket)}|${r.rank}">${escapeHtml(r.bucket)} #${r.rank}</a></td>
           <td class="num">${fmtNum(s.median)}</td>
           <td class="num">${fmtNum(s.mean)}</td>
           <td class="num">${fmtNum(s.std)}</td>
@@ -5441,6 +5447,35 @@ if (typeof window !== "undefined") {
     next();
   }
 
+  /* ---------------- Click a lineup name in any results table -> popup with that lineup ---------------- */
+  function lookupLineup(ref) {
+    const [bucket, rankStr] = ref.split("|"); const i = parseInt(rankStr, 10) - 1;
+    const R = state.results;
+    const src = { "Projection": R.proj, "Ceiling": R.ceil, "Small Field": R.small, "Large Field": R.large, "Sim-Built": R.sim }[bucket];
+    const item = src && src[i];
+    if (!item) return null;
+    return { arr: item.arr || item, field: bucket === "Small Field" ? "own" : "ownLarge" };
+  }
+  function closeLineupModal() { const m = document.getElementById("lineupModal"); if (m) m.remove(); }
+  document.addEventListener("click", (ev) => {
+    const link = ev.target.closest && ev.target.closest("[data-lineup-ref]");
+    if (link) {
+      ev.preventDefault();
+      const ref = link.dataset.lineupRef, found = lookupLineup(ref);
+      if (!found) return;
+      closeLineupModal();
+      const isSd = state.contestType === "showdown";
+      const card = isSd ? renderShowdownLineupCard(found.arr, 0, { ownField: found.field }) : renderLineupCard(found.arr, 0, { showBadges: true, ownField: found.field });
+      const m = document.createElement("div");
+      m.id = "lineupModal"; m.className = "lineup-modal";
+      m.innerHTML = `<div class="lineup-modal-box"><button type="button" class="lineup-modal-close" aria-label="Close">×</button><div class="slider-note" style="margin:0 0 6px;"><b>${escapeHtml(ref.replace("|", " #"))}</b></div>${card}</div>`;
+      document.body.appendChild(m);
+      return;
+    }
+    if (ev.target.closest && (ev.target.closest(".lineup-modal-close") || ev.target.id === "lineupModal")) closeLineupModal();
+  });
+  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeLineupModal(); });
+
   function sbSettings() {
     const d = { metric: "blend", count: 20, sharp: 35, cons: 15, fieldPct: 35, runs: 1000, maxStack: 5 };
     return Object.assign(d, state.sb || {});
@@ -5508,7 +5543,7 @@ if (typeof window !== "undefined") {
     const th = (label, key) => `<th class="sortable-th${sortKey === key ? " active" : ""}" data-sb-sort="${key}">${label}${sortKey === key ? " ▼" : ""}</th>`;
     const table = `<div class="slider-note" style="margin:18px 0 4px;"><b>Simulation results — Sim-Built lineups</b></div>
       <div style="overflow-x:auto"><table class="sim-table"><thead><tr>${th("Lineup", "idx")}${th("Cash Rate", "oosCash")}${th("Robust ROI", "oosCap")}${th("Raw ROI", "oosRoi")}${th("Median Rank", "median")}<th>Best Rank</th></tr></thead><tbody>${sorted.map(r => `<tr>
-        <td class="bucket-label">Sim-Built #${r.idx + 1}</td><td class="num">${f(r.oosCash)}%</td><td class="num"${r.oosCap < 0 ? ' style="color:var(--rust);"' : ""}>${sg(r.oosCap)}%</td><td class="num">${sg(r.oosRoi)}%</td><td class="num">${r.median.toLocaleString()}</td><td class="num">${r.best.toLocaleString()}</td></tr>`).join("")}</tbody></table></div>`;
+        <td class="bucket-label"><a href="#" class="lineup-link" data-lineup-ref="Sim-Built|${r.idx + 1}">Sim-Built #${r.idx + 1}</a></td><td class="num">${f(r.oosCash)}%</td><td class="num"${r.oosCap < 0 ? ' style="color:var(--rust);"' : ""}>${sg(r.oosCap)}%</td><td class="num">${sg(r.oosRoi)}%</td><td class="num">${r.median.toLocaleString()}</td><td class="num">${r.best.toLocaleString()}</td></tr>`).join("")}</tbody></table></div>`;
     const cards = state.results.sim.map((arr, i) => {
       const r = sb.rows[i];
       const tag = `<div class="slider-note" style="margin:0 0 4px;">Sim-Built #${i + 1} · cash ${f(r.oosCash)}% · robust ROI ${sg(r.oosCap)}%</div>`;
@@ -5568,7 +5603,7 @@ if (typeof window !== "undefined") {
         const res = r.result;
         const roiClass = res.roiPct >= 0 ? "" : ' style="color:var(--rust);"';
         return `<tr>
-          <td class="bucket-label">${escapeHtml(r.bucket)} #${r.rank}</td>
+          <td class="bucket-label"><a href="#" class="lineup-link" data-lineup-ref="${escapeHtml(r.bucket)}|${r.rank}">${escapeHtml(r.bucket)} #${r.rank}</a></td>
           <td class="num"${res.roiCappedPct >= 0 ? "" : ' style="color:var(--rust);"'}>${res.roiCappedPct >= 0 ? "+" : ""}${fmtNum(res.roiCappedPct)}%</td>
           <td class="num"${roiClass}>${res.roiPct >= 0 ? "+" : ""}${fmtNum(res.roiPct)}%</td>
           <td class="num">${fmtNum(res.cashRatePct)}%</td>

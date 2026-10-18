@@ -5249,7 +5249,7 @@ if (typeof window !== "undefined") {
     };
     const qbs = pool.filter(p => p.position === "QB");
     const topQb = Math.max(...qbs.map(p => p.proj), 0);
-    const teams = [...new Set(qbs.filter(p => p.proj >= 0.6 * topQb).map(p => p.team))];
+    const teams = ctx.allowedTeams ? [...ctx.allowedTeams].filter(t => qbs.some(q => q.team === t)) : [...new Set(qbs.filter(p => p.proj >= 0.6 * topQb).map(p => p.team))];
     if (teams.length === 0) { statusEl.textContent = "No viable QBs found in the pool."; statusEl.className = "status-line err"; return; }
     btn.disabled = true; statusEl.className = "status-line";
     const cands = [];
@@ -5348,6 +5348,16 @@ if (typeof window !== "undefined") {
   function simBuildValid(arr, isShowdown, ctx) {
     const ids = new Set(arr.map(p => p.id));
     if (ids.size !== arr.length) return false;
+    if (ctx.allowedTeams && ctx.allowedTeams.size) {
+      if (isShowdown) {
+        const tc2 = new Map();
+        for (const p of arr) tc2.set(p.team, (tc2.get(p.team) || 0) + 1);
+        if (![...tc2].some(([t, n]) => n >= 3 && ctx.allowedTeams.has(t))) return false;
+      } else {
+        const qb = arr.find(p => p.position === "QB");
+        if (!qb || !ctx.allowedTeams.has(qb.team)) return false;
+      }
+    }
     if (isShowdown) {
       if (arr.length !== 6 || arr.filter(p => p.isCaptain).length !== 1) return false;
       const sal = arr.reduce((s, p) => s + (p.isCaptain ? p.salary * 1.5 : p.salary), 0);
@@ -5422,6 +5432,7 @@ if (typeof window !== "undefined") {
       salaryCap, minSalary, flexEligible, teamCount: new Set(pool.map(p => p.team)).size,
       maxMainTeam: parseInt(els.sliderMaxMainTeam.value, 10), maxOtherTeam: parseInt(els.sliderMaxOtherTeam.value, 10),
       maxStack: sbs.maxStack, // most non-DST players from any one team
+      allowedTeams: (sbs.teams && sbs.teams.length) ? new Set(sbs.teams) : null,
     };
     const genMain = Math.min(ctx.maxStack, ctx.maxMainTeam > 0 ? ctx.maxMainTeam : 99), genOther = Math.min(ctx.maxStack, ctx.maxOtherTeam > 0 ? ctx.maxOtherTeam : 99);
     const baseGen = {
@@ -5446,13 +5457,15 @@ if (typeof window !== "undefined") {
       statusEl.textContent = "Building a broad candidate pool…";
       existingRaw.forEach(addCand);
       if (isShowdown) {
-        const gens = [null, { configs: [{ count: 5, team: null }] }, { configs: [{ count: 4, team: null }] }, { configs: [{ count: 3, team: null }] }];
+        const sel = ctx.allowedTeams ? [...ctx.allowedTeams] : null;
+        const cfg = (n) => ({ configs: sel ? sel.map(t => ({ count: n, team: t })) : [{ count: n, team: null }] });
+        const gens = [sel ? cfg(3) : null, cfg(5), cfg(4), cfg(3)];
         gens.forEach((structure, gi) => {
           eng.generateShowdownCorrelated(pool, gi === 0 ? 120 : 50, { ...baseGen, poolAttempts: 2500, seed: 31 + gi, structure }).forEach(r => addCand(r.arr));
         });
       } else {
         const gcommon = { ...baseGen, flexEligible, vegasContext: state.vegasContext, maxMainTeam: genMain, maxOtherTeam: genOther, secondaryStackSize: 0, tertiaryStackSize: 0 };
-        eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31, bringBackShare: 0.5, stackTeams: [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
+        eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
         const qbs = pool.filter(p => p.position === "QB");
         const topQb = Math.max(...qbs.map(p => p.proj), 0);
         const teams = [...new Set(qbs.filter(p => p.proj >= 0.6 * topQb).map(p => p.team))];
@@ -5587,12 +5600,20 @@ if (typeof window !== "undefined") {
   document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeLineupModal(); });
 
   function sbSettings() {
-    const d = { metric: "blend", count: 20, sharp: 35, cons: 15, fieldPct: 35, runs: 1000, maxStack: 5 };
+    const d = { metric: "blend", count: 20, sharp: 35, cons: 15, fieldPct: 35, runs: 1000, maxStack: 5, teams: [] };
     return Object.assign(d, state.sb || {});
+  }
+
+  function sbTeamList() {
+    const ps = state.players || [];
+    const withQb = new Set(ps.filter(p => p.position === "QB").map(p => p.team));
+    const all = new Set(ps.map(p => p.team));
+    return [...(state.contestType === "showdown" ? all : withQb)].sort();
   }
 
   function renderSimBuildControls() {
     const s = sbSettings();
+    const isSdUi = state.contestType === "showdown";
     const c = state.contestPresets.find(p => p.id === state.activeContestPresetId) || state.contestPresets[0];
     const chip = (key, label) => `<button type="button" class="platform-chip${s.metric === key ? " selected" : ""}" data-simbuild-metric="${key}">${label}</button>`;
     const presetChips = state.contestPresets.map(p => `<button type="button" class="mode-chip${p.id === state.activeContestPresetId ? " selected" : ""}" data-sb-preset="${p.id}">${escapeHtml(p.label)}</button>`).join("");
@@ -5602,6 +5623,8 @@ if (typeof window !== "undefined") {
       <div class="slider-note" style="margin:0 0 6px;"><b>Contest</b> (${c ? `${c.totalEntries.toLocaleString()} entries · $${c.entryFee} entry` : "none selected"})</div>
       <div class="platform-row" style="margin-top:0; flex-wrap:wrap;">${presetChips}</div>
       <div class="platform-row">${chip("blend", "Optimize: Blend")}${chip("cash", "Optimize: Cash rate")}${chip("roi", "Optimize: Robust ROI")}</div>
+      <div class="slider-note" style="margin:10px 0 4px;"><b>Teams to stack</b> — ${s.teams.length ? s.teams.join(", ") : "all teams"}. ${isSdUi ? "Showdown lineups must carry at least 3 players from a chosen team." : "Every lineup's QB will be from a chosen team."}</div>
+      <div class="platform-row" style="margin-top:0; flex-wrap:wrap;"><button type="button" class="mode-chip${s.teams.length ? "" : " selected"}" data-sb-team="*">Any</button>${sbTeamList().map(t => `<button type="button" class="mode-chip${s.teams.includes(t) ? " selected" : ""}" data-sb-team="${escapeHtml(t)}">${escapeHtml(t)}</button>`).join("")}</div>
       ${slider("sbStack", "Max stack size", s.maxStack + " players", 2, 6, 1, s.maxStack, "Most players from any one team, counting the QB. Defenses never count toward a stack. In Showdown this caps the larger side of the split (5 = allow 5-1).")}
       ${slider("sbCount", "Lineups to build", s.count, 5, 60, 5, s.count)}
       ${slider("sbSharp", "Sharp opponent share", s.sharp + "%", 0, 80, 5, s.sharp)}
@@ -5616,6 +5639,11 @@ if (typeof window !== "undefined") {
     const b = document.getElementById("runSimBuildBtn");
     if (b) b.addEventListener("click", runSimBuild);
     document.querySelectorAll("[data-simbuild-metric]").forEach(x => x.addEventListener("click", () => { state.sb = Object.assign(sbSettings(), { metric: x.dataset.simbuildMetric }); render(); }));
+    document.querySelectorAll("[data-sb-team]").forEach(x => x.addEventListener("click", () => {
+      const cur = sbSettings().teams.slice(), t = x.dataset.sbTeam;
+      const next = t === "*" ? [] : (cur.includes(t) ? cur.filter(z => z !== t) : [...cur, t]);
+      state.sb = Object.assign(sbSettings(), { teams: next }); render();
+    }));
     document.querySelectorAll("[data-sb-preset]").forEach(x => x.addEventListener("click", () => { state.activeContestPresetId = x.dataset.sbPreset; persistContestPresets(); render(); }));
     const bind = (id, key, fmt) => {
       const el = document.getElementById(id), val = document.getElementById(id + "Val");

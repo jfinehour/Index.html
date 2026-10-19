@@ -1184,8 +1184,64 @@ function normalizePosition(raw) {
   return POSITION_ALIASES[up] || up;
 }
 
+/**
+ * Some Showdown exports ("CPT" format) carry only captain-slot numbers: CPT PROJ and
+ * CPT CEIL are the 1.5x captain values, SAL is the normal (FLEX) salary, and the only
+ * ownership given is CPT OWN. Convert those rows to the standard flex-based layout the
+ * rest of the app uses: projection and ceiling divided by 1.5, and a rostered-share
+ * (Total Own) estimated as CPT own plus a flex share spread across the slate in
+ * proportion to projection^1.8 (the five FLEX slots add up to 500%, each player capped
+ * at 90%). Players projected at zero are inactive and dropped.
+ */
+function convertCptFormat(rows) {
+  const header = rows[0].map(h => h.trim().toLowerCase());
+  const ix = (...names) => { for (const n of names) { const i = header.indexOf(n); if (i !== -1) return i; } return -1; };
+  const c = {
+    name: ix("name", "player"), team: ix("tm", "team"), opp: ix("opp", "opponent"), pos: ix("pos", "position"),
+    sal: ix("sal", "salary"), proj: ix("cpt proj"), ceil: ix("cpt ceil", "cpt ceiling"), own: ix("cpt own"),
+  };
+  if (c.name < 0 || c.team < 0 || c.pos < 0 || c.sal < 0 || c.proj < 0 || c.ceil < 0 || c.own < 0) return null;
+  const rec = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || r.every(x => x === "")) continue;
+    const cp = cleanNumber(r[c.proj]), cc = cleanNumber(r[c.ceil]), co = cleanNumber(r[c.own]), sal = cleanNumber(r[c.sal]);
+    if (!r[c.name] || isNaN(cp) || isNaN(sal) || cp <= 0) continue;
+    rec.push({ r, proj: cp / 1.5, ceil: (isNaN(cc) ? cp * 1.6 : cc) / 1.5, cptOwn: isNaN(co) ? 0 : co, sal });
+  }
+  if (!rec.length) return null;
+  // flex ownership: share of the 500% of FLEX slots, proportional to proj^1.8, capped at 90%
+  const w = rec.map(x => Math.pow(x.proj, 1.8));
+  let flex = new Array(rec.length).fill(0);
+  let fixed = new Array(rec.length).fill(false);
+  for (let it = 0; it < 12; it++) {
+    const free = w.reduce((a, v, i) => a + (fixed[i] ? 0 : v), 0);
+    const left = 500 - flex.reduce((a, v, i) => a + (fixed[i] ? v : 0), 0);
+    let changed = false;
+    for (let i = 0; i < rec.length; i++) {
+      if (fixed[i]) continue;
+      flex[i] = free > 0 ? left * w[i] / free : 0;
+      if (flex[i] > 65) { flex[i] = 65; fixed[i] = true; changed = true; }
+    }
+    if (!changed) break;
+  }
+  const out = [["Player", "Pos", "Team", "Opp", "Salary", "Proj", "Ceiling", "Total Own"]];
+  rec.forEach((x, i) => {
+    const total = Math.min(100, x.cptOwn + flex[i]);
+    out.push([x.r[c.name], x.r[c.pos], x.r[c.team], c.opp >= 0 ? x.r[c.opp] : "", String(x.sal), x.proj.toFixed(2), x.ceil.toFixed(2), total.toFixed(2)]);
+  });
+  return out;
+}
+
 function loadPlayers(csvText) {
-  const rows = parseCSV(csvText);
+  let rows = parseCSV(csvText);
+  {
+    const h = rows[0].map(x => x.trim().toLowerCase());
+    if (h.includes("cpt proj") && !h.some(x => COLUMN_ALIASES.proj.includes(x))) {
+      const conv = convertCptFormat(rows);
+      if (conv) rows = conv;
+    }
+  }
   const header = rows[0];
   const colmap = resolveColumns(header);
   const hasFloor = colmap.floor !== -1 && colmap.floor !== undefined;

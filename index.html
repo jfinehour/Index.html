@@ -6165,7 +6165,7 @@ if (typeof window !== "undefined") {
   const tick = () => new Promise(r => setTimeout(r, 0));
   let simming = false;
 
-  const pctFmt = (x) => x == null || isNaN(x) ? "–" : (x >= 10 ? Math.round(x) : x >= 0.05 ? x.toFixed(1) : x > 0 ? "<0.1" : "0") + "%";
+  const pctFmt = (x) => x == null || isNaN(x) ? "–" : x.toFixed(2) + "%";
   const sgnPct = (x) => (x >= 0 ? "+" : "") + Math.round(x) + "%";
   const sgn1 = (x) => (x >= 0 ? "+" : "") + fmtNum(x);
   const roiCell = (x) => `<span class="${x >= 0 ? "pos-val" : "neg-val"}">${sgnPct(x)}</span>`;
@@ -6511,15 +6511,15 @@ if (typeof window !== "undefined") {
     }
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);
     stats.hidden = false;
-    stats.innerHTML = [["Avg cash", f(B.oosCash) + "%"], ["Avg robust ROI", sg(B.oosCap) + "%"], ["Avg raw ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
-    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${B.metric === "cash" ? "cash rate" : B.metric === "roi" ? "robust ROI" : "a blend of cash rate and robust ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${f(B.inCash)}%, so the gap to ${f(B.oosCash)}% is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat raw ROI with suspicion.</div>
-      <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Robust ROI</th><th class="n">Raw ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${f(B.oosCash)}%</td><td class="n">${sg(B.oosCap)}%</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${f(r.cash)}%</td><td class="n">${sg(r.cap)}%</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
+    stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg robust ROI", sg(B.oosCap) + "%"], ["Avg raw ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
+    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${B.metric === "cash" ? "cash rate" : B.metric === "roi" ? "robust ROI" : "a blend of cash rate and robust ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat raw ROI with suspicion.</div>
+      <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Robust ROI</th><th class="n">Raw ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${sg(B.oosCap)}%</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${sg(r.cap)}%</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
     const rows = B.rows.map((r, i) => ({ ...r, arr: state.results.sim[i] }));
     const key = state.sbSort || "idx";
     rows.sort((x, y) => key === "idx" ? x.idx - y.idx : key === "median" ? x.median - y.median : y[key] - x[key]);
     const th = (k, t, n = true) => `<th class="sortable${n ? " n" : ""}" data-k="${k}"${key === k ? ' data-dir="▼"' : ""}>${t}</th>`;
     body.innerHTML = `<table class="simt"><thead><tr>${th("idx", "#", false)}<th>Lineup</th>${th("oosCash", "Cash")}${th("oosCap", "Robust ROI")}${th("oosRoi", "Raw ROI")}${th("median", "Median rank")}<th class="n">Best rank</th></tr></thead><tbody>` +
-      rows.map(r => `<tr><td class="rank">${String(r.idx + 1).padStart(3, "0")}</td><td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="Sim-Built|${r.idx + 1}">Sim-Built #${r.idx + 1}</a>${namesOf(orderForNames(r.arr, sd))}</td><td class="n">${f(r.oosCash)}%</td><td class="n">${roiCell(r.oosCap)}</td><td class="n">${roiCell(r.oosRoi)}</td><td class="n">${r.median.toLocaleString()}</td><td class="n">${r.best.toLocaleString()}</td></tr>`).join("") + "</tbody></table>";
+      rows.map(r => `<tr><td class="rank">${String(r.idx + 1).padStart(3, "0")}</td><td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="Sim-Built|${r.idx + 1}">Sim-Built #${r.idx + 1}</a>${namesOf(orderForNames(r.arr, sd))}</td><td class="n">${pctFmt(r.oosCash)}</td><td class="n">${roiCell(r.oosCap)}</td><td class="n">${roiCell(r.oosRoi)}</td><td class="n">${r.median.toLocaleString()}</td><td class="n">${r.best.toLocaleString()}</td></tr>`).join("") + "</tbody></table>";
     foot.hidden = false;
     foot.innerHTML = `<span class="meta">Sim-built lineups are on the Optimizer tab as their own set, ready to export.</span><button class="btn primary" id="viewBuilt">View on Optimizer tab</button>`;
     $("viewBuilt").onclick = () => { state.resType = "sim"; state.resultsSite = siteKey(); state.view = "opt"; render(); window.scrollTo({ top: 0 }); };

@@ -865,7 +865,7 @@ textarea.out { width: 100%; height: 120px; font-family: var(--f-data); font-size
 .outwrap { padding: 0 14px 14px; }
 .pos-val { color: #7BA7FF; font-weight: 500; }
 .neg-val { color: var(--excl); }
-.simt td.lnames, .lu td.lnames, .lnames { white-space: normal; min-width: 220px; max-width: 380px; font-size: 12.5px; line-height: 1.35; }
+.simt td.lnames, .lu td.lnames, .lnames { white-space: normal; min-width: 300px; max-width: 560px; font-size: 12.5px; line-height: 1.35; }
 .lnames .c { color: var(--accent); font-weight: 600; }
 .lnames a.lineup-link { font-family: var(--f-data); font-size: 11px; color: var(--muted); display: block; font-weight: 500; }
 th.cg, td.cg { border-left: 1px solid var(--line); }
@@ -6428,7 +6428,7 @@ if (typeof window !== "undefined") {
     return rows.sort((a, b) => { const x = get(a, sort.key), y = get(b, sort.key); if (x == null && y == null) return 0; if (x == null) return 1; if (y == null) return -1; return (typeof x === "string" ? x.localeCompare(y) : x - y) * sort.dir; });
   }
   const thS = (k, t, sort, n = true) => `<th class="sortable${n ? " n" : ""}" data-k="${k}"${sort.key === k ? ` data-dir="${sort.dir > 0 ? "▲" : "▼"}"` : ""}>${t}</th>`;
-  const namesOf = (arr) => arr.map(p => p.isCaptain ? `<span class="c">${escapeHtml(lastName(p.name))} (C)</span>` : escapeHtml(lastName(p.name))).join(" · ");
+  const namesOf = (arr) => arr.map(p => { const t = `${escapeHtml(p.name)} <small class="tm">(${escapeHtml(p.team || "")})</small>`; return p.isCaptain ? `<span class="c">${t} (C)</span>` : t; }).join(" · ");
   const orderForNames = (arr, sd) => sd ? showdownSlotOrder(arr).map(x => x.p) : slotOrder(arr).map(x => x.p);
 
   function renderSim() {

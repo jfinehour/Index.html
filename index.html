@@ -740,6 +740,9 @@ tr.pl-edited td.bucket-label { color: #E8C58A; }
 .pl-tg.x.on { background: #A33; border-color: #A33; }
 tr.pl-excl td { opacity: .45; }
 tr.pl-locked td.bucket-label { color: #7BD389; }
+
+.pl-exp { display: inline-flex; align-items: center; gap: 4px; }
+.pl-exp i { display: inline-block; height: 8px; background: #E8C58A; border-radius: 3px; }
 </style>
 </head>
 <body>
@@ -969,8 +972,8 @@ tr.pl-locked td.bucket-label { color: #7BD389; }
   </div>
 
   <div class="tabbar" id="tabbar">
-    <button class="tab" data-tab="players">Players</button>
-    <button class="tab active" data-tab="proj">Projection <span class="count">·10</span></button>
+    <button class="tab active" data-tab="players">Players</button>
+    <button class="tab" data-tab="proj">Projection <span class="count">·10</span></button>
     <button class="tab" data-tab="ceil">Ceiling <span class="count">·10</span></button>
     <button class="tab" data-tab="small">Small Field <span class="count" id="tabCountSmall">·40</span></button>
     <button class="tab" data-tab="large">Large Field <span class="count" id="tabCountLarge">·40</span></button>
@@ -3628,7 +3631,7 @@ if (typeof window !== "undefined") {
     rules: new Map(), // name -> {lock, excl, min, max} per-player build rules from the Players tab
     edits: new Map(), // name -> {proj, ceiling, floor, own, ownLarge, ...flags} manual overrides from the Players tab
     basePlayers: null,
-    pl: { q: "", pos: "ALL", team: "ALL", view: "all", sortKey: "proj", sortDir: -1 },
+    pl: { q: "", pos: "ALL", team: "ALL", view: "all", expSet: "gpp", sortKey: "proj", sortDir: -1 },
     playerBoosts: new Map(), // name -> boost fraction (e.g. 0.05 = +5%), GPP selection only
     contestResults: null,
     contestSort: { key: "roiCappedPct", dir: "desc" },
@@ -3714,7 +3717,7 @@ if (typeof window !== "undefined") {
     showdownScriptBody: document.getElementById("showdownScriptBody"),
   };
 
-  let activeTab = "proj";
+  let activeTab = "players";
 
   /* ---------------- Platform (DraftKings / FanDuel) & Contest type ---------------- */
   const STORAGE_KEY_PLATFORM = "gridlock_platform";
@@ -4290,9 +4293,9 @@ if (typeof window !== "undefined") {
 
     updateTabCounts();
     setStatus("");
-    activeTab = "proj";
+    activeTab = "players";
     els.tabbar.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-    document.querySelector('[data-tab="proj"]').classList.add("active");
+    document.querySelector('[data-tab="players"]').classList.add("active");
     render();
   });
 
@@ -5099,8 +5102,25 @@ if (typeof window !== "undefined") {
       <div class="platform-row" style="flex-wrap:wrap;margin-top:6px;">${posList.map(p => chip("pos", p, p)).join("")}</div>
       <div class="platform-row" style="flex-wrap:wrap;margin-top:6px;">${teams.map(t => chip("team", t, t)).join("")}</div>
       <div class="platform-row" style="flex-wrap:wrap;margin-top:6px;">${[["all", "All"], ["lock", "Locked"], ["excl", "Excluded"], ["rule", "Any rule"]].map(([k, l]) => chip("view", k, l)).join("")}<span class="slider-note" id="plRuleCount" style="align-self:center;"></span></div>
+      <div class="platform-row" style="flex-wrap:wrap;margin-top:6px;"><span class="slider-note" style="align-self:center;">Exposure in:</span>${[["gpp", "Small + Large"], ["small", "Small"], ["large", "Large"], ["proj", "Projection"], ["ceil", "Ceiling"], ["sim", "Sim-Built"], ["all", "All"]].map(([k, l]) => chip("expSet", k, l)).join("")}</div>
       <div id="plStale" class="slider-note" style="display:none;margin:8px 0;">Edits and rules apply the next time you press Generate (or Build in Sim-Built). Lineups already on screen were built from the earlier settings.</div>
       <div style="overflow-x:auto"><table class="sim-table pl-table"><thead id="plHead"></thead><tbody id="plBody"></tbody></table></div>`;
+  }
+
+  function plExposure() {
+    const R = state.results, set = state.pl.expSet;
+    const arrs = [];
+    const add = (l, f) => (l || []).forEach(x => arrs.push(f(x)));
+    if (set === "proj") add(R.proj, x => x);
+    else if (set === "ceil") add(R.ceil, x => x);
+    else if (set === "small") add(R.small, x => x.arr);
+    else if (set === "large") add(R.large, x => x.arr);
+    else if (set === "sim") add(R.sim, x => x);
+    else if (set === "all") { add(R.proj, x => x); add(R.ceil, x => x); add(R.small, x => x.arr); add(R.large, x => x.arr); add(R.sim, x => x); }
+    else { add(R.small, x => x.arr); add(R.large, x => x.arr); }
+    const c = new Map();
+    arrs.forEach(arr => arr.forEach(p => c.set(p.name, (c.get(p.name) || 0) + 1)));
+    return { c, n: arrs.length };
   }
 
   function renderPlayersTable() {
@@ -5112,10 +5132,12 @@ if (typeof window !== "undefined") {
     const val = (p) => p.salary ? p.proj / (p.salary / 1000) : 0;
     let rows = state.players.filter(p => (f.pos === "ALL" || p.position === f.pos) && (f.team === "ALL" || p.team === f.team) && (!q || p.name.toLowerCase().includes(q) || p.team.toLowerCase() === q) &&
       (f.view === "all" || (f.view === "lock" ? isLocked(p.name) : f.view === "excl" ? isExcl(p.name) : !!(ruleOf(p.name) && (ruleOf(p.name).lock || ruleOf(p.name).excl || ruleOf(p.name).min != null || ruleOf(p.name).max != null)))));
-    const get = (p) => f.sortKey === "val" ? val(p) : p[f.sortKey];
+    const ex = plExposure();
+    const expOf = (p) => ex.n ? (ex.c.get(p.name) || 0) / ex.n * 100 : 0;
+    const get = (p) => f.sortKey === "val" ? val(p) : f.sortKey === "exp" ? expOf(p) : p[f.sortKey];
     rows.sort((x, y) => { const a = get(x), b = get(y); return (typeof a === "string" ? a.localeCompare(b) : (a || 0) - (b || 0)) * f.sortDir; });
     const th = (k, label, num) => `<th class="sortable-th${f.sortKey === k ? " active" : ""}${num ? " num" : ""}" data-pl-sort="${k}">${label}${f.sortKey === k ? (f.sortDir > 0 ? " ▲" : " ▼") : ""}</th>`;
-    head.innerHTML = `<tr><th title="Lock into every lineup / Exclude"></th>${th("name", "Player")}<th>Pos</th>${th("team", "Team")}${th("salary", isSd ? "Salary (FLEX)" : "Salary", 1)}${th("proj", "Proj", 1)}${th("ceiling", "Ceil", 1)}${th("val", "Value", 1)}${th("own", hasLarge ? "Own (Small)" : "Own %", 1)}${hasLarge ? th("ownLarge", "Own (Large)", 1) : ""}<th class="num">Min %</th><th class="num">Max %</th><th></th></tr>`;
+    head.innerHTML = `<tr><th title="Lock into every lineup / Exclude"></th>${th("name", "Player")}<th>Pos</th>${th("team", "Team")}${th("salary", isSd ? "Salary (FLEX)" : "Salary", 1)}${th("proj", "Proj", 1)}${th("ceiling", "Ceil", 1)}${th("val", "Value", 1)}${th("own", hasLarge ? "Own (Small)" : "Own %", 1)}${hasLarge ? th("ownLarge", "Own (Large)", 1) : ""}<th class="num">Min %</th><th class="num">Max %</th>${th("exp", ex.n ? `Exp (${ex.n})` : "Exp", 1)}<th></th></tr>`;
     const inp = (name, field, v, step) => `<input class="pl-in${state.edits.get(name) && state.edits.get(name)[field] !== undefined && Math.abs(state.edits.get(name)[field] - plBaseByName(name)[field]) > 1e-9 ? " edited" : ""}" type="number" step="${step}" min="0" data-pl-edit="${field}" data-pl-name="${escapeHtml(name)}" value="${Number.isFinite(v) ? +(+v).toFixed(2) : ""}">`;
     const rin = (name, field) => { const r = ruleOf(name); const v = r && r[field] != null ? r[field] : ""; return `<input class="pl-in sm" type="number" min="0" max="100" step="5" placeholder="–" data-pl-rule="${field}" data-pl-name="${escapeHtml(name)}" value="${v}">`; };
     const nLock = lockedNames().length, nEx = [...state.rules].filter(([, r]) => r.excl).length;
@@ -5128,8 +5150,9 @@ if (typeof window !== "undefined") {
       <td class="num">${val(p).toFixed(2)}</td>
       <td class="num">${inp(p.name, "own", p.own, 0.5)}</td>${hasLarge ? `<td class="num">${inp(p.name, "ownLarge", p.ownLarge, 0.5)}</td>` : ""}
       <td class="num">${rin(p.name, "min")}</td><td class="num">${rin(p.name, "max")}</td>
+      <td class="num">${ex.n ? `<span class="pl-exp"><i style="width:${Math.max(ex.c.get(p.name) ? 2 : 0, expOf(p) * 0.4)}px"></i>${Math.round(expOf(p))}%</span>` : "–"}</td>
       <td>${state.edits.has(p.name) ? `<button type="button" class="pl-undo" data-pl-undo="${escapeHtml(p.name)}" title="Undo edits">↺</button>` : ""}</td></tr>`).join("")
-      : `<tr><td colspan="12" class="empty">No players match these filters.</td></tr>`;
+      : `<tr><td colspan="13" class="empty">No players match these filters.</td></tr>`;
     body.querySelectorAll("[data-pl-edit]").forEach(i => i.addEventListener("change", () => plCommit(i.dataset.plName, i.dataset.plEdit, i.value)));
     body.querySelectorAll("[data-pl-tg]").forEach(b => b.addEventListener("click", () => {
       const name = b.dataset.plName, kind = b.dataset.plTg;
@@ -5163,6 +5186,7 @@ if (typeof window !== "undefined") {
     if (s) s.addEventListener("input", () => { state.pl.q = s.value; renderPlayersTable(); });
     document.querySelectorAll("[data-pl-pos]").forEach(b => b.addEventListener("click", () => { state.pl.pos = b.dataset.plPos; render(); }));
     document.querySelectorAll("[data-pl-team]").forEach(b => b.addEventListener("click", () => { state.pl.team = b.dataset.plTeam; render(); }));
+    document.querySelectorAll("[data-pl-expSet]").forEach(b => b.addEventListener("click", () => { state.pl.expSet = b.dataset.plExpset; render(); }));
     document.querySelectorAll("[data-pl-view]").forEach(b => b.addEventListener("click", () => { state.pl.view = b.dataset.plView; render(); }));
     const cr = document.getElementById("plClearRules");
     if (cr) cr.addEventListener("click", () => { state.rules.clear(); plApplyAndRefresh(); render(); });

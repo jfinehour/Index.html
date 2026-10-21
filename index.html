@@ -733,6 +733,13 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
 tr.pl-edited td.bucket-label { color: #E8C58A; }
 .pl-undo { background: none; border: 0; color: inherit; cursor: pointer; font-size: 15px; opacity: .8; }
 #plSearch { background: transparent; color: inherit; border: 1px solid var(--border, rgba(255,255,255,.2)); border-radius: 8px; padding: 7px 10px; font: inherit; }
+
+.pl-in.sm { width: 52px; }
+.pl-tg { width: 26px; height: 26px; margin-right: 4px; border-radius: 6px; border: 1px solid rgba(255,255,255,.2); background: transparent; color: inherit; font-weight: 700; cursor: pointer; }
+.pl-tg.on { background: #2E7D4F; border-color: #2E7D4F; color: #fff; }
+.pl-tg.x.on { background: #A33; border-color: #A33; }
+tr.pl-excl td { opacity: .45; }
+tr.pl-locked td.bucket-label { color: #7BD389; }
 </style>
 </head>
 <body>
@@ -2032,8 +2039,9 @@ function generateCorrelatedLineups(players, n, opts = {}) {
           maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
           flexEligible = FLEX_ELIGIBLE, stackTeams = null, stackSize = 1,
           vegasContext = null, salaryCap = SALARY_CAP, minSalary = 0, ceilingWeight = 1.0,
-          secondaryStackSize = 0, tertiaryStackSize = 0, boosts = null, maxMainTeam = 0, maxOtherTeam = 0 } = opts;
+          secondaryStackSize = 0, tertiaryStackSize = 0, boosts = null, maxMainTeam = 0, maxOtherTeam = 0, requireNames = null } = opts;
   const rng = mulberry32(seed);
+  const reqNames = requireNames && requireNames.length ? requireNames : null;
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
   const qbTeamFilter = (stackTeams && stackTeams.length > 0) ? new Set(stackTeams) : null;
 
@@ -2063,6 +2071,7 @@ function generateCorrelatedLineups(players, n, opts = {}) {
       requireStack: true, requireBringBack: wantBringBack, iterations: 8, flexEligible, qbTeamFilter, stackSize, salaryCap, minSalary, maxMainTeam, maxOtherTeam,
       secondaryStackSize, tertiaryStackSize,
     });
+    if (reqNames && !reqNames.every(nm => improved.arr.some(p => p.name === nm))) continue;
     const sig = signature(improved.arr);
     if (seenSigs.has(sig)) continue;
     seenSigs.add(sig);
@@ -2080,8 +2089,8 @@ function generateCorrelatedLineups(players, n, opts = {}) {
     for (const c of candidates) {
       if (accepted.length >= n) break;
       if (accepted.includes(c)) continue;
-      if (c.arr.some(p => (exposure.get(p.name) || 0) >= curMaxExposure)) continue;
-      if (accepted.some(a => overlapCount(a.arr, c.arr) > curMaxOverlap)) continue;
+      if (c.arr.some(p => !(reqNames && reqNames.includes(p.name)) && (exposure.get(p.name) || 0) >= curMaxExposure)) continue;
+      if (accepted.some(a => overlapCount(a.arr, c.arr) > curMaxOverlap + (reqNames ? reqNames.length : 0))) continue;
       accepted.push(c);
       for (const p of c.arr) exposure.set(p.name, (exposure.get(p.name) || 0) + 1);
     }
@@ -2440,8 +2449,9 @@ function showdownOverlapCount(a, b) {
 function generateShowdownCorrelated(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, ownershipField = "own",
           maxExposureFraction = 0.4, maxOverlap = 4, salaryCap = 50000, minSalary = 0, ceilingWeight = 1.0,
-          structure = null, boosts = null } = opts;
+          structure = null, boosts = null, requireNames = null } = opts;
   const rng = mulberry32(seed);
+  const reqNames = requireNames && requireNames.length ? requireNames : null;
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
 
   // See the matching comment in generateCorrelatedLineups — boosts only
@@ -2459,6 +2469,7 @@ function generateShowdownCorrelated(players, n, opts = {}) {
   for (let i = 0; i < poolAttempts; i++) {
     const built = buildShowdownLineup(players, { scoreFn: leverageScore, rng, noise: 0.30, topK: 14, salaryCap, minSalary, structure });
     if (!built) continue;
+    if (reqNames && !reqNames.every(nm => built.some(p => p.name === nm))) continue;
     const sig = showdownSignature(built);
     if (seenSigs.has(sig)) continue;
     seenSigs.add(sig);
@@ -2473,8 +2484,8 @@ function generateShowdownCorrelated(players, n, opts = {}) {
     for (const c of candidates) {
       if (accepted.length >= n) break;
       if (accepted.includes(c)) continue;
-      if (c.arr.some(p => (exposure.get(p.name) || 0) >= curMaxExposure)) continue;
-      if (accepted.some(a => showdownOverlapCount(a.arr, c.arr) > curMaxOverlap)) continue;
+      if (c.arr.some(p => !(reqNames && reqNames.includes(p.name)) && (exposure.get(p.name) || 0) >= curMaxExposure)) continue;
+      if (accepted.some(a => showdownOverlapCount(a.arr, c.arr) > curMaxOverlap + (reqNames ? reqNames.length : 0))) continue;
       accepted.push(c);
       for (const p of c.arr) exposure.set(p.name, (exposure.get(p.name) || 0) + 1);
     }
@@ -3614,9 +3625,10 @@ if (typeof window !== "undefined") {
     contestPresets: makeSeededContestPresets(),
     activeContestPresetId: "preset_large_single",
     contestFormMode: "view", // "view" | "add" | "edit"
+    rules: new Map(), // name -> {lock, excl, min, max} per-player build rules from the Players tab
     edits: new Map(), // name -> {proj, ceiling, floor, own, ownLarge, ...flags} manual overrides from the Players tab
     basePlayers: null,
-    pl: { q: "", pos: "ALL", team: "ALL", sortKey: "proj", sortDir: -1 },
+    pl: { q: "", pos: "ALL", team: "ALL", view: "all", sortKey: "proj", sortDir: -1 },
     playerBoosts: new Map(), // name -> boost fraction (e.g. 0.05 = +5%), GPP selection only
     contestResults: null,
     contestSort: { key: "roiCappedPct", dir: "desc" },
@@ -3977,7 +3989,7 @@ if (typeof window !== "undefined") {
       const players = eng.loadPlayers(text);
       if (players.length === 0) throw new Error("No player rows found.");
       state.sources[slot] = { raw: text, players, label: label || null };
-      if (!opts.skipPersist) state.edits.clear(); // a fresh upload starts from the file's numbers
+      if (!opts.skipPersist) { state.edits.clear(); state.rules.clear(); } // a fresh upload starts from the file's numbers
       statusEl.textContent = `${players.length} players${label ? " (" + label + ")" : ""}`;
       statusEl.className = "source-status ok";
       if (!opts.skipPersist) safeStorageSet(STORAGE_KEY_CSV_PREFIX + slot, text);
@@ -4092,6 +4104,68 @@ if (typeof window !== "undefined") {
     safeStorageSet(STORAGE_KEY_MODE, state.mode || "");
   }
 
+  /* ---------------- Per-player rules: lock / exclude / min & max exposure ---------------- */
+  function ruleOf(name) { return state.rules.get(name) || null; }
+  function isExcl(name) { const r = ruleOf(name); return !!(r && r.excl); }
+  function isLocked(name) { const r = ruleOf(name); return !!(r && r.lock); }
+  function rulesActive() { for (const r of state.rules.values()) if (r.lock || r.excl || r.min != null || r.max != null) return true; return false; }
+  function lockedNames() { return [...state.rules].filter(([, r]) => r.lock).map(([n]) => n); }
+  // Boosts used to pull locked / minimum-exposure players into the candidate lineups the builders create.
+  function ruleBoosts() {
+    const m = new Map(state.playerBoosts);
+    for (const [name, r] of state.rules) {
+      if (r.lock) m.set(name, Math.max(m.get(name) || 0, 20));
+      else if (r.min != null && r.min > 0) m.set(name, Math.max(m.get(name) || 0, 0.25 + r.min / 100));
+    }
+    return m;
+  }
+  // Chooses n lineups from a best-first candidate list so every rule holds: locked players in every
+  // lineup, per-player max/min exposure, plus the global exposure cap for everyone else.
+  function selectWithRules(list, n, expFrac, arrOf) {
+    if (!rulesActive()) return list.slice(0, n);
+    const locks = lockedNames();
+    const cands = list.map((x, i) => ({ x, i, arr: arrOf(x) })).filter(c => locks.every(nm => c.arr.some(p => p.name === nm)));
+    const picked = [];
+    const cnt = new Map();
+    const has = new Set();
+    const capFor = (name, globalCap) => { const r = ruleOf(name); if (r && r.max != null) return Math.floor(r.max / 100 * n + 1e-9); if (r && r.lock) return n; return globalCap; };
+    const fits = (c, globalCap) => c.arr.every(p => (cnt.get(p.name) || 0) < capFor(p.name, globalCap));
+    const take = (c) => { picked.push(c); has.add(c.i); c.arr.forEach(p => cnt.set(p.name, (cnt.get(p.name) || 0) + 1)); };
+    const cap0 = Math.max(1, Math.ceil(expFrac * n));
+    // minimum exposure first, biggest asks first
+    const mins = [...state.rules].filter(([, r]) => r.min != null && r.min > 0).sort((p, q) => q[1].min - p[1].min);
+    for (const [name, r] of mins) {
+      const need = Math.ceil(r.min / 100 * n - 1e-9);
+      for (const c of cands) {
+        if ((cnt.get(name) || 0) >= need || picked.length >= n) break;
+        if (has.has(c.i) || !c.arr.some(p => p.name === name) || !fits(c, Math.max(cap0, need))) continue;
+        take(c);
+      }
+    }
+    for (const gc of [cap0, cap0 + 3, cap0 + 6, cap0 + 10, n]) {
+      for (const c of cands) {
+        if (picked.length >= n) break;
+        if (has.has(c.i) || !fits(c, gc)) continue;
+        take(c);
+      }
+      if (picked.length >= n) break;
+    }
+    return picked.sort((p, q) => p.i - q.i).map(c => c.x);
+  }
+
+  // Players capped well below 100% sit in nearly every top lineup, so build extra candidate batches
+  // with each of them removed; the selector then has lineups without them to choose from.
+  function ruleBatches(pool) {
+    const caps = [...state.rules].filter(([, r]) => r.max != null && r.max < 60 && !r.lock).sort((p, q) => p[1].max - q[1].max).slice(0, 4).map(([nm]) => nm);
+    return [pool, ...caps.map(nm => pool.filter(p => p.name !== nm))];
+  }
+  function mergeBatches(lists, arrOf, scoreOf, sigOf) {
+    const seen = new Set(), out = [];
+    for (const l of lists) for (const x of l) { const s = sigOf(arrOf(x)); if (seen.has(s)) continue; seen.add(s); out.push(x); }
+    return out.sort((p, q) => scoreOf(q) - scoreOf(p));
+  }
+  const genOver = (pool, run, arrOf, scoreOf, sigOf) => !rulesActive() ? run(pool, 0) : mergeBatches(ruleBatches(pool).map((bp, k) => run(bp, k)), arrOf, scoreOf, sigOf);
+
   function applyEdits(base) {
     return base.map(p => {
       const e = state.edits.get(p.name);
@@ -4108,6 +4182,7 @@ if (typeof window !== "undefined") {
       state.players = null;
       state.basePlayers = null;
       state.edits.clear();
+      state.rules.clear();
       state.selectedTeams = new Set();
       state.playerBoosts.clear();
       els.fileStatus.textContent = "No projections active yet";
@@ -4448,10 +4523,16 @@ if (typeof window !== "undefined") {
     setStatus("Generating Projection lineups...");
     // Chunk the work with setTimeout so the UI can repaint status between stages.
     setTimeout(() => {
-      const players = state.players;
+      const allPlayers = state.players;
+      const players = allPlayers.filter(p => !isExcl(p.name)); // excluded players stay in the field model, never in your lineups
       const salaryCap = getSalaryCap();
-      state.generationPool = players;
+      state.generationPool = allPlayers;
       state.buildInfo = null;
+      const M = rulesActive() ? 3 : 1; // build extra candidates so the rules have something to choose from
+      const keepName = (p) => isLocked(p.name) || ((ruleOf(p.name) || {}).min > 0);
+      const lockSet = new Set(lockedNames());
+      const lockMetric = (f) => (p) => f(p) + (lockSet.has(p.name) ? 1000 : 0);
+      const genBoosts = ruleBoosts();
 
       if (state.contestType === "showdown") {
         const script = state.showdownScript;
@@ -4465,12 +4546,12 @@ if (typeof window !== "undefined") {
 
         // Game-script scenario: rebuild the pool's projections from simulated
         // games that match the chosen winner / total (see engine notes).
-        let pool = players;
+        let pool = allPlayers;
         let scenarioInfo = null;
         if (sdTeams.length === 2 && (script.winner || script.total)) {
           try {
             const lineVal = (script.line !== "" && script.line != null) ? parseFloat(script.line) : null;
-            const res = eng.buildShowdownScenarioPool(players, {
+            const res = eng.buildShowdownScenarioPool(allPlayers, {
               winner: script.winner, total: script.total,
               line: (lineVal != null && !isNaN(lineVal)) ? lineVal : null,
               vegasContext: state.vegasContext,
@@ -4494,10 +4575,12 @@ if (typeof window !== "undefined") {
         // Showdown analog of Classic's Stack Size — it only applies to the
         // GPP tabs below, not here. Projection/Ceiling stay the true
         // unconstrained optimum (still under the game-script pool, if set).
-        state.results.proj = eng.generateShowdownTopN(players, p => p.proj, 10, { attempts: 500, seed: 1, salaryCap });
+        const sdM = lockMetric(p => p.proj);
+        state.results.proj = selectWithRules(genOver(players, (bp, k) => eng.generateShowdownTopN(bp, sdM, 10 * M, { attempts: 500, seed: 1 + k, salaryCap }), x => x, x => eng.showdownScore(x, sdM), eng.showdownSignature), 10, 1, x => x);
         setStatus("Generating Ceiling lineups...");
         setTimeout(() => {
-          state.results.ceil = eng.generateShowdownTopN(players, p => p.ceiling, 10, { attempts: 500, seed: 7, salaryCap });
+          const sdC = lockMetric(p => p.ceiling);
+          state.results.ceil = selectWithRules(genOver(players, (bp, k) => eng.generateShowdownTopN(bp, sdC, 10 * M, { attempts: 500, seed: 7 + k, salaryCap }), x => x, x => eng.showdownScore(x, sdC), eng.showdownSignature), 10, 1, x => x);
           setStatus("Generating Small Field GPP lineups...");
           setTimeout(() => {
             const n = parseInt(els.sliderGppCount.value, 10);
@@ -4509,21 +4592,21 @@ if (typeof window !== "undefined") {
             // last-resort salary-dump if nothing else fits a required slot —
             // excluding them outright (Projection/Ceiling untouched) stops that.
             const minProj = parseFloat(els.sliderMinProj.value);
-            const gppPool = pool.filter(p => p.proj >= minProj);
+            const gppPool = pool.filter(p => !isExcl(p.name) && (p.proj >= minProj || keepName(p)));
             const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
             const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
-            state.results.small = eng.generateShowdownCorrelated(gppPool, n, {
-              poolAttempts: 4000, seed: 11, ownershipField: "own", salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts,
+            state.results.small = selectWithRules(genOver(gppPool, (bp, k) => eng.generateShowdownCorrelated(bp, n * M, {
+              poolAttempts: 4000, seed: 11 + k, ownershipField: "own", salaryCap, minSalary, ceilingWeight, boosts: genBoosts, requireNames: lockedNames(),
               ownershipWeight: smallOwn, maxExposureFraction: expFrac, structure,
-            }).map(r => ({ arr: r.arr, bringBack: false }));
+            }).map(r => ({ arr: r.arr, bringBack: false, score: r.score })), r => r.arr, r => r.score, eng.showdownSignature), n, expFrac, r => r.arr);
             state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, maxExposureFraction: expFrac, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, showdown: true };
             setStatus("Generating Large Field GPP lineups...");
             setTimeout(() => {
               const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
-              state.results.large = eng.generateShowdownCorrelated(gppPool, n, {
-                poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts,
+              state.results.large = selectWithRules(genOver(gppPool, (bp, k) => eng.generateShowdownCorrelated(bp, n * M, {
+                poolAttempts: 4000, seed: 22 + k, ownershipField: "ownLarge", salaryCap, minSalary, ceilingWeight, boosts: genBoosts, requireNames: lockedNames(),
                 ownershipWeight: largeOwn, maxExposureFraction: expFrac, structure,
-              }).map(r => ({ arr: r.arr, bringBack: false }));
+              }).map(r => ({ arr: r.arr, bringBack: false, score: r.score })), r => r.arr, r => r.score, eng.showdownSignature), n, expFrac, r => r.arr);
               state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, maxExposureFraction: expFrac, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, showdown: true };
               setStatus("Done.");
               els.generateBtn.disabled = false;
@@ -4538,10 +4621,12 @@ if (typeof window !== "undefined") {
       }
 
       const flexEligible = els.toggleTEFlex.checked ? new Set(["RB", "WR", "TE"]) : new Set(["RB", "WR"]);
-      state.results.proj = eng.generateTopN(players, p => p.proj, 10, { attempts: 500, seed: 1, flexEligible, salaryCap });
+      const cM = lockMetric(p => p.proj);
+      state.results.proj = selectWithRules(genOver(players, (bp, k) => eng.generateTopN(bp, cM, 10 * M, { attempts: 500, seed: 1 + k, flexEligible, salaryCap }), x => x, x => eng.lineupScore(x, cM), eng.signature), 10, 1, x => x);
       setStatus("Generating Ceiling lineups...");
       setTimeout(() => {
-        state.results.ceil = eng.generateTopN(players, p => p.ceiling, 10, { attempts: 500, seed: 7, flexEligible, salaryCap });
+        const cC = lockMetric(p => p.ceiling);
+        state.results.ceil = selectWithRules(genOver(players, (bp, k) => eng.generateTopN(bp, cC, 10 * M, { attempts: 500, seed: 7 + k, flexEligible, salaryCap }), x => x, x => eng.lineupScore(x, cC), eng.signature), 10, 1, x => x);
         setStatus("Generating Small Field GPP lineups...");
         setTimeout(() => {
           const n = parseInt(els.sliderGppCount.value, 10);
@@ -4555,25 +4640,25 @@ if (typeof window !== "undefined") {
           // GPP-only floor — see the matching comment in the Showdown branch
           // above. Projection/Ceiling (generateTopN, just above) are untouched.
           const minProj = parseFloat(els.sliderMinProj.value);
-          const gppPlayers = players.filter(p => p.proj >= minProj);
+          const gppPlayers = players.filter(p => p.proj >= minProj || keepName(p));
           const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
           const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
           const maxMainTeam = parseInt(els.sliderMaxMainTeam.value, 10);
           const maxOtherTeam = parseInt(els.sliderMaxOtherTeam.value, 10);
-          state.results.small = eng.generateCorrelatedLineups(gppPlayers, n, {
-            poolAttempts: 4000, seed: 11, ownershipField: "own", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts, maxMainTeam, maxOtherTeam,
+          state.results.small = selectWithRules(genOver(gppPlayers, (bp, k) => eng.generateCorrelatedLineups(bp, n * M, {
+            poolAttempts: 4000, seed: 11 + k, ownershipField: "own", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: genBoosts, maxMainTeam, maxOtherTeam, requireNames: lockedNames(),
             ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
             stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
-          });
+          }), r => r.arr, r => r.score, eng.signature), n, expFrac, r => r.arr);
           state.resultsMeta.small = { ownershipField: "own", ownershipFieldLabel: "Small Field", ownershipWeight: smallOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, maxMainTeam, maxOtherTeam, showdown: false };
           setStatus("Generating Large Field GPP lineups...");
           setTimeout(() => {
             const largeOwn = parseInt(els.sliderLargeOwn.value, 10) / 100;
-            state.results.large = eng.generateCorrelatedLineups(gppPlayers, n, {
-              poolAttempts: 4000, seed: 22, ownershipField: "ownLarge", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: state.playerBoosts, maxMainTeam, maxOtherTeam,
+            state.results.large = selectWithRules(genOver(gppPlayers, (bp, k) => eng.generateCorrelatedLineups(bp, n * M, {
+              poolAttempts: 4000, seed: 22 + k, ownershipField: "ownLarge", flexEligible, salaryCap, minSalary, ceilingWeight, boosts: genBoosts, maxMainTeam, maxOtherTeam, requireNames: lockedNames(),
               ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac,
               stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
-            });
+            }), r => r.arr, r => r.score, eng.signature), n, expFrac, r => r.arr);
             state.resultsMeta.large = { ownershipField: "ownLarge", ownershipFieldLabel: "Large Field", ownershipWeight: largeOwn, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, maxMainTeam, maxOtherTeam, showdown: false };
             setStatus("Done.");
             els.generateBtn.disabled = false;
@@ -4972,7 +5057,7 @@ if (typeof window !== "undefined") {
     const n = document.getElementById("plEditCount");
     if (n) n.textContent = state.edits.size ? `${state.edits.size} player${state.edits.size === 1 ? "" : "s"} edited` : "No edits";
     const note = document.getElementById("plStale");
-    if (note) note.style.display = state.edits.size && (state.results.proj || state.results.small) ? "block" : "none";
+    if (note) note.style.display = (state.edits.size || state.rules.size) && (state.results.proj || state.results.small) ? "block" : "none";
   }
 
   function plCommit(name, field, raw) {
@@ -5006,13 +5091,15 @@ if (typeof window !== "undefined") {
     const posList = ["ALL", ...[...new Set(state.players.map(p => p.position))].sort((x, y) => (["QB", "RB", "WR", "TE", "K", "DST"].indexOf(x) + 99) % 99 - (["QB", "RB", "WR", "TE", "K", "DST"].indexOf(y) + 99) % 99)];
     const teams = ["ALL", ...[...new Set(state.players.map(p => p.team))].sort()];
     const chip = (key, val, label) => `<button type="button" class="platform-chip${state.pl[key] === val ? " selected" : ""}" data-pl-${key}="${escapeHtml(val)}">${escapeHtml(label)}</button>`;
-    return `<div class="sim-intro"><b>Players &amp; projections.</b> Everything loaded from your file is here. Click any <b>Proj</b>, <b>Ceil</b> or <b>Own</b> number to change it; edited numbers are highlighted and feed every build and simulation. Changing a projection scales that player's ceiling and floor with it (edit Ceil afterwards to set it yourself). ${isSd ? "Showdown values are for the FLEX slot; the captain scores 1.5× and costs 1.5×." : ""}</div>
+    return `<div class="sim-intro"><b>Players &amp; projections.</b> Everything loaded from your file is here. Click any <b>Proj</b>, <b>Ceil</b> or <b>Own</b> number to change it; edited numbers are highlighted and feed every build and simulation. Changing a projection scales that player's ceiling and floor with it (edit Ceil afterwards to set it yourself). <b>L</b> locks a player into every lineup, <b>X</b> excludes him, and <b>Min%</b> / <b>Max%</b> set how many of each build's lineups he should be in. ${isSd ? "Showdown values are for the FLEX slot; the captain scores 1.5× and costs 1.5×." : ""}</div>
       <div class="platform-row" style="flex-wrap:wrap;margin-top:0;"><input type="search" id="plSearch" placeholder="Search players or teams" value="${escapeHtml(state.pl.q)}" style="flex:1 1 180px; min-width:140px;">
         <span class="slider-note" id="plEditCount" style="align-self:center;">${state.edits.size ? `${state.edits.size} player${state.edits.size === 1 ? "" : "s"} edited` : "No edits"}</span>
-        <button type="button" class="platform-chip" id="plResetAll">Reset all edits</button></div>
+        <button type="button" class="platform-chip" id="plResetAll">Reset all edits</button>
+        <button type="button" class="platform-chip" id="plClearRules">Clear player rules</button></div>
       <div class="platform-row" style="flex-wrap:wrap;margin-top:6px;">${posList.map(p => chip("pos", p, p)).join("")}</div>
       <div class="platform-row" style="flex-wrap:wrap;margin-top:6px;">${teams.map(t => chip("team", t, t)).join("")}</div>
-      <div id="plStale" class="slider-note" style="display:none;margin:8px 0;">Edits apply the next time you press Generate. Lineups already on screen were built from the earlier numbers.</div>
+      <div class="platform-row" style="flex-wrap:wrap;margin-top:6px;">${[["all", "All"], ["lock", "Locked"], ["excl", "Excluded"], ["rule", "Any rule"]].map(([k, l]) => chip("view", k, l)).join("")}<span class="slider-note" id="plRuleCount" style="align-self:center;"></span></div>
+      <div id="plStale" class="slider-note" style="display:none;margin:8px 0;">Edits and rules apply the next time you press Generate (or Build in Sim-Built). Lineups already on screen were built from the earlier settings.</div>
       <div style="overflow-x:auto"><table class="sim-table pl-table"><thead id="plHead"></thead><tbody id="plBody"></tbody></table></div>`;
   }
 
@@ -5023,25 +5110,50 @@ if (typeof window !== "undefined") {
     const hasLarge = state.players.some(p => Math.abs((p.ownLarge || 0) - (p.own || 0)) > 0.05);
     const q = f.q.trim().toLowerCase();
     const val = (p) => p.salary ? p.proj / (p.salary / 1000) : 0;
-    let rows = state.players.filter(p => (f.pos === "ALL" || p.position === f.pos) && (f.team === "ALL" || p.team === f.team) && (!q || p.name.toLowerCase().includes(q) || p.team.toLowerCase() === q));
+    let rows = state.players.filter(p => (f.pos === "ALL" || p.position === f.pos) && (f.team === "ALL" || p.team === f.team) && (!q || p.name.toLowerCase().includes(q) || p.team.toLowerCase() === q) &&
+      (f.view === "all" || (f.view === "lock" ? isLocked(p.name) : f.view === "excl" ? isExcl(p.name) : !!(ruleOf(p.name) && (ruleOf(p.name).lock || ruleOf(p.name).excl || ruleOf(p.name).min != null || ruleOf(p.name).max != null)))));
     const get = (p) => f.sortKey === "val" ? val(p) : p[f.sortKey];
     rows.sort((x, y) => { const a = get(x), b = get(y); return (typeof a === "string" ? a.localeCompare(b) : (a || 0) - (b || 0)) * f.sortDir; });
     const th = (k, label, num) => `<th class="sortable-th${f.sortKey === k ? " active" : ""}${num ? " num" : ""}" data-pl-sort="${k}">${label}${f.sortKey === k ? (f.sortDir > 0 ? " ▲" : " ▼") : ""}</th>`;
-    head.innerHTML = `<tr>${th("name", "Player")}<th>Pos</th>${th("team", "Team")}${th("salary", isSd ? "Salary (FLEX)" : "Salary", 1)}${th("proj", "Proj", 1)}${th("ceiling", "Ceil", 1)}${th("val", "Value", 1)}${th("own", hasLarge ? "Own (Small)" : "Own %", 1)}${hasLarge ? th("ownLarge", "Own (Large)", 1) : ""}<th></th></tr>`;
+    head.innerHTML = `<tr><th title="Lock into every lineup / Exclude"></th>${th("name", "Player")}<th>Pos</th>${th("team", "Team")}${th("salary", isSd ? "Salary (FLEX)" : "Salary", 1)}${th("proj", "Proj", 1)}${th("ceiling", "Ceil", 1)}${th("val", "Value", 1)}${th("own", hasLarge ? "Own (Small)" : "Own %", 1)}${hasLarge ? th("ownLarge", "Own (Large)", 1) : ""}<th class="num">Min %</th><th class="num">Max %</th><th></th></tr>`;
     const inp = (name, field, v, step) => `<input class="pl-in${state.edits.get(name) && state.edits.get(name)[field] !== undefined && Math.abs(state.edits.get(name)[field] - plBaseByName(name)[field]) > 1e-9 ? " edited" : ""}" type="number" step="${step}" min="0" data-pl-edit="${field}" data-pl-name="${escapeHtml(name)}" value="${Number.isFinite(v) ? +(+v).toFixed(2) : ""}">`;
-    body.innerHTML = rows.length ? rows.map(p => `<tr${state.edits.has(p.name) ? ' class="pl-edited"' : ""}>
+    const rin = (name, field) => { const r = ruleOf(name); const v = r && r[field] != null ? r[field] : ""; return `<input class="pl-in sm" type="number" min="0" max="100" step="5" placeholder="–" data-pl-rule="${field}" data-pl-name="${escapeHtml(name)}" value="${v}">`; };
+    const nLock = lockedNames().length, nEx = [...state.rules].filter(([, r]) => r.excl).length;
+    const rc = document.getElementById("plRuleCount"); if (rc) rc.textContent = `${nLock} locked · ${nEx} excluded`;
+    body.innerHTML = rows.length ? rows.map(p => `<tr class="${state.edits.has(p.name) ? "pl-edited " : ""}${isLocked(p.name) ? "pl-locked " : ""}${isExcl(p.name) ? "pl-excl" : ""}">
+      <td style="white-space:nowrap"><button type="button" class="pl-tg${isLocked(p.name) ? " on" : ""}" data-pl-tg="lock" data-pl-name="${escapeHtml(p.name)}" title="Lock into every lineup">L</button><button type="button" class="pl-tg x${isExcl(p.name) ? " on" : ""}" data-pl-tg="excl" data-pl-name="${escapeHtml(p.name)}" title="Exclude from every lineup">X</button></td>
       <td class="bucket-label">${escapeHtml(p.name)}</td><td>${escapeHtml(p.position)}</td><td>${escapeHtml(p.team)}${p.opp ? ` <small style="opacity:.6">v ${escapeHtml(p.opp.replace("@", ""))}</small>` : ""}</td>
       <td class="num">$${p.salary.toLocaleString()}${isSd ? `<br><small style="opacity:.6">CPT $${Math.round(p.salary * 1.5).toLocaleString()}</small>` : ""}</td>
       <td class="num">${inp(p.name, "proj", p.proj, 0.1)}</td><td class="num">${inp(p.name, "ceiling", p.ceiling, 0.1)}</td>
       <td class="num">${val(p).toFixed(2)}</td>
       <td class="num">${inp(p.name, "own", p.own, 0.5)}</td>${hasLarge ? `<td class="num">${inp(p.name, "ownLarge", p.ownLarge, 0.5)}</td>` : ""}
+      <td class="num">${rin(p.name, "min")}</td><td class="num">${rin(p.name, "max")}</td>
       <td>${state.edits.has(p.name) ? `<button type="button" class="pl-undo" data-pl-undo="${escapeHtml(p.name)}" title="Undo edits">↺</button>` : ""}</td></tr>`).join("")
-      : `<tr><td colspan="9" class="empty">No players match these filters.</td></tr>`;
+      : `<tr><td colspan="12" class="empty">No players match these filters.</td></tr>`;
     body.querySelectorAll("[data-pl-edit]").forEach(i => i.addEventListener("change", () => plCommit(i.dataset.plName, i.dataset.plEdit, i.value)));
+    body.querySelectorAll("[data-pl-tg]").forEach(b => b.addEventListener("click", () => {
+      const name = b.dataset.plName, kind = b.dataset.plTg;
+      const r = Object.assign({}, ruleOf(name) || {});
+      const on = !r[kind];
+      if (kind === "lock") { r.lock = on; if (on) r.excl = false; } else { r.excl = on; if (on) { r.lock = false; r.min = null; } }
+      plSaveRule(name, r); plApplyAndRefresh();
+    }));
+    body.querySelectorAll("[data-pl-rule]").forEach(i => i.addEventListener("change", () => {
+      const name = i.dataset.plName, field = i.dataset.plRule;
+      const r = Object.assign({}, ruleOf(name) || {});
+      const v = i.value === "" ? null : Math.max(0, Math.min(100, parseFloat(i.value)));
+      r[field] = (v == null || isNaN(v)) ? null : v;
+      if (r.min != null && r.max != null && r.min > r.max) { if (field === "min") r.max = r.min; else r.min = r.max; }
+      if (r.min != null && r.excl) r.excl = false;
+      plSaveRule(name, r); plApplyAndRefresh();
+    }));
     body.querySelectorAll("[data-pl-undo]").forEach(b => b.addEventListener("click", () => { state.edits.delete(b.dataset.plUndo); plApplyAndRefresh(); }));
     head.querySelectorAll("[data-pl-sort]").forEach(h => h.addEventListener("click", () => {
       const k = h.dataset.plSort; state.pl.sortDir = state.pl.sortKey === k ? -state.pl.sortDir : (k === "name" || k === "team" ? 1 : -1); state.pl.sortKey = k; renderPlayersTable();
     }));
+  }
+  function plSaveRule(name, r) {
+    if (!r.lock && !r.excl && r.min == null && r.max == null) state.rules.delete(name); else state.rules.set(name, r);
   }
   function plBaseByName(name) { return (state.basePlayers || []).find(b => b.name === name) || {}; }
 
@@ -5051,6 +5163,9 @@ if (typeof window !== "undefined") {
     if (s) s.addEventListener("input", () => { state.pl.q = s.value; renderPlayersTable(); });
     document.querySelectorAll("[data-pl-pos]").forEach(b => b.addEventListener("click", () => { state.pl.pos = b.dataset.plPos; render(); }));
     document.querySelectorAll("[data-pl-team]").forEach(b => b.addEventListener("click", () => { state.pl.team = b.dataset.plTeam; render(); }));
+    document.querySelectorAll("[data-pl-view]").forEach(b => b.addEventListener("click", () => { state.pl.view = b.dataset.plView; render(); }));
+    const cr = document.getElementById("plClearRules");
+    if (cr) cr.addEventListener("click", () => { state.rules.clear(); plApplyAndRefresh(); render(); });
     const r = document.getElementById("plResetAll");
     if (r) r.addEventListener("click", () => { state.edits.clear(); plApplyAndRefresh(); render(); });
     if (state.edits.size) plApplyAndRefresh();
@@ -5060,6 +5175,7 @@ if (typeof window !== "undefined") {
     const isGpp = tab === "small" || tab === "large";
     const isShowdown = state.contestType === "showdown";
     let hint = "";
+    if (rulesActive()) hint += " You have player rules set (Players tab): check that your locked players fit together (one QB, one defense, the salary cap) and that exclusions leave enough players at each position.";
     if (isGpp) {
       hint = " If you've raised Minimum projection, that may have excluded too many players at a required position — try lowering it.";
       hint += isShowdown
@@ -5533,6 +5649,7 @@ if (typeof window !== "undefined") {
   function simBuildValid(arr, isShowdown, ctx) {
     const ids = new Set(arr.map(p => p.id));
     if (ids.size !== arr.length) return false;
+    if (ctx.locks && ctx.locks.length && !ctx.locks.every(nm => arr.some(p => p.name === nm))) return false;
     if (ctx.allowedTeams && ctx.allowedTeams.size) {
       if (isShowdown) {
         const tc2 = new Map();
@@ -5609,7 +5726,7 @@ if (typeof window !== "undefined") {
     const flexEligible = els.toggleTEFlex.checked ? new Set(["RB", "WR", "TE"]) : new Set(["RB", "WR"]);
     const minProj = parseFloat(els.sliderMinProj.value);
     const basePool = isShowdown ? (state.generationPool || state.players) : state.players;
-    const pool = basePool.filter(p => p.proj >= minProj);
+    const pool = basePool.filter(p => !isExcl(p.name) && (p.proj >= minProj || isLocked(p.name) || ((ruleOf(p.name) || {}).min > 0)));
     const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
     const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
     const expFrac = parseInt(els.sliderExposure.value, 10) / 100;
@@ -5618,11 +5735,12 @@ if (typeof window !== "undefined") {
       maxMainTeam: parseInt(els.sliderMaxMainTeam.value, 10), maxOtherTeam: parseInt(els.sliderMaxOtherTeam.value, 10),
       maxStack: sbs.maxStack, // most non-DST players from any one team
       allowedTeams: (sbs.teams && sbs.teams.length) ? new Set(sbs.teams) : null,
+      locks: lockedNames(),
     };
     const genMain = Math.min(ctx.maxStack, ctx.maxMainTeam > 0 ? ctx.maxMainTeam : 99), genOther = Math.min(ctx.maxStack, ctx.maxOtherTeam > 0 ? ctx.maxOtherTeam : 99);
     const baseGen = {
       poolAttempts: 1500, ownershipField: "ownLarge", salaryCap, minSalary, ceilingWeight: parseInt(els.sliderCeilingWeight.value, 10) / 100,
-      boosts: state.playerBoosts, ownershipWeight: parseInt(els.sliderLargeOwn.value, 10) / 100, maxExposureFraction: 0.7,
+      boosts: ruleBoosts(), ownershipWeight: parseInt(els.sliderLargeOwn.value, 10) / 100, maxExposureFraction: 0.7,
     };
     const rng = eng.mulberry32(777);
     const existingRaw = [];
@@ -5701,17 +5819,31 @@ if (typeof window !== "undefined") {
       const picked = [];
       const exp = new Map();
       const sharedMax = isShowdown ? 4 : 6;
-      const pass = (expCap, overlapCap) => {
+      const capFor = (p, expCap) => { const r = ruleOf(p.name); if (r && r.max != null) return Math.floor(r.max / 100 * nTarget + 1e-9); if (r && r.lock) return nTarget; return expCap; };
+      const pass = (expCap, overlapCap, forName) => {
         for (const x of ranked) {
           if (picked.length >= nTarget) break;
           if (picked.includes(x)) continue;
-          if (x.arr.some(p => (exp.get(p.id) || 0) >= expCap)) continue;
+          if (forName && !x.arr.some(p => p.name === forName)) continue;
+          if (x.arr.some(p => (exp.get(p.id) || 0) >= capFor(p, expCap))) continue;
           const ids = new Set(x.arr.map(p => p.id));
           if (picked.some(y => y.arr.filter(p => ids.has(p.id)).length > overlapCap)) continue;
           picked.push(x); x.arr.forEach(p => exp.set(p.id, (exp.get(p.id) || 0) + 1));
         }
       };
       const cap0 = Math.max(1, Math.ceil(expFrac * nTarget));
+      // minimum-exposure players first, biggest asks first
+      [...state.rules].filter(([, r]) => r.min != null && r.min > 0).sort((p, q) => q[1].min - p[1].min).forEach(([name, r]) => {
+        const need = Math.ceil(r.min / 100 * nTarget - 1e-9);
+        const have = () => picked.filter(x => x.arr.some(p => p.name === name)).length;
+        for (const [ec, oc] of [[cap0, sharedMax], [cap0 + 4, sharedMax + 2], [nTarget, sharedMax + 3]]) {
+          if (have() >= need) break;
+          const before = picked.length;
+          pass(Math.max(ec, need), oc, name);
+          // pass() fills toward nTarget; trim back if it overshot this player's need
+          while (have() > need && picked.length > before) { const last = picked.pop(); last.arr.forEach(p => exp.set(p.id, (exp.get(p.id) || 1) - 1)); }
+        }
+      });
       pass(cap0, sharedMax); pass(cap0, sharedMax + 1); pass(Math.ceil(cap0 * 1.3), sharedMax + 2); pass(nTarget, sharedMax + 3);
       // out-of-sample check: fresh seed, alongside the existing buckets for comparison
       const base = existingRaw.map(simArr), mine = picked.map(x => simArr(x.arr));

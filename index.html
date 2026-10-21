@@ -727,6 +727,12 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
 .lineup-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1000; display: flex; align-items: flex-start; justify-content: center; padding: 5vh 12px; overflow-y: auto; }
 .lineup-modal-box { position: relative; background: var(--bg-panel, #0D1A3D); color: inherit; border-radius: 12px; padding: 16px; width: 100%; max-width: 560px; box-shadow: 0 10px 40px rgba(0,0,0,0.4); }
 .lineup-modal-close { position: absolute; top: 6px; right: 10px; background: none; border: 0; font-size: 26px; line-height: 1; cursor: pointer; color: inherit; }
+
+.pl-in { width: 64px; text-align: right; background: transparent; color: inherit; border: 1px solid var(--border, rgba(255,255,255,.15)); border-radius: 6px; padding: 3px 5px; font: inherit; }
+.pl-in.edited { border-color: #E8C58A; background: rgba(232,197,138,.12); }
+tr.pl-edited td.bucket-label { color: #E8C58A; }
+.pl-undo { background: none; border: 0; color: inherit; cursor: pointer; font-size: 15px; opacity: .8; }
+#plSearch { background: transparent; color: inherit; border: 1px solid var(--border, rgba(255,255,255,.2)); border-radius: 8px; padding: 7px 10px; font: inherit; }
 </style>
 </head>
 <body>
@@ -956,6 +962,7 @@ table.sim-table td.bucket-label { color: var(--text-dim); font-size: 11.5px; whi
   </div>
 
   <div class="tabbar" id="tabbar">
+    <button class="tab" data-tab="players">Players</button>
     <button class="tab active" data-tab="proj">Projection <span class="count">·10</span></button>
     <button class="tab" data-tab="ceil">Ceiling <span class="count">·10</span></button>
     <button class="tab" data-tab="small">Small Field <span class="count" id="tabCountSmall">·40</span></button>
@@ -3607,6 +3614,9 @@ if (typeof window !== "undefined") {
     contestPresets: makeSeededContestPresets(),
     activeContestPresetId: "preset_large_single",
     contestFormMode: "view", // "view" | "add" | "edit"
+    edits: new Map(), // name -> {proj, ceiling, floor, own, ownLarge, ...flags} manual overrides from the Players tab
+    basePlayers: null,
+    pl: { q: "", pos: "ALL", team: "ALL", sortKey: "proj", sortDir: -1 },
     playerBoosts: new Map(), // name -> boost fraction (e.g. 0.05 = +5%), GPP selection only
     contestResults: null,
     contestSort: { key: "roiCappedPct", dir: "desc" },
@@ -3967,6 +3977,7 @@ if (typeof window !== "undefined") {
       const players = eng.loadPlayers(text);
       if (players.length === 0) throw new Error("No player rows found.");
       state.sources[slot] = { raw: text, players, label: label || null };
+      if (!opts.skipPersist) state.edits.clear(); // a fresh upload starts from the file's numbers
       statusEl.textContent = `${players.length} players${label ? " (" + label + ")" : ""}`;
       statusEl.className = "source-status ok";
       if (!opts.skipPersist) safeStorageSet(STORAGE_KEY_CSV_PREFIX + slot, text);
@@ -3978,6 +3989,7 @@ if (typeof window !== "undefined") {
 
       updateModeSelector();
       recomputeActivePool();
+      if (!opts.skipPersist) showPlayersTab();
       return true;
     } catch (err) {
       statusEl.textContent = "Error: " + err.message;
@@ -4080,10 +4092,22 @@ if (typeof window !== "undefined") {
     safeStorageSet(STORAGE_KEY_MODE, state.mode || "");
   }
 
+  function applyEdits(base) {
+    return base.map(p => {
+      const e = state.edits.get(p.name);
+      if (!e) return { ...p };
+      const q = { ...p };
+      for (const k of ["proj", "ceiling", "floor", "own", "ownLarge"]) if (e[k] !== undefined) q[k] = e[k];
+      return q;
+    });
+  }
+
   function recomputeActivePool() {
     const loaded = loadedSlots();
     if (loaded.length === 0) {
       state.players = null;
+      state.basePlayers = null;
+      state.edits.clear();
       state.selectedTeams = new Set();
       state.playerBoosts.clear();
       els.fileStatus.textContent = "No projections active yet";
@@ -4109,7 +4133,8 @@ if (typeof window !== "undefined") {
       label = "Site " + slot;
     }
 
-    state.players = players;
+    state.basePlayers = players;
+    state.players = applyEdits(players);
     state.selectedTeams = new Set();
     state.playerBoosts.clear(); // names are tied to this specific pool — don't carry over to a new one
     els.fileStatus.textContent = `${players.length} players active — ${label}`;
@@ -4504,6 +4529,7 @@ if (typeof window !== "undefined") {
               els.generateBtn.disabled = false;
               els.exportBtn.disabled = false;
               updateTabCounts();
+              if (activeTab === "players") { activeTab = "proj"; els.tabbar.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "proj")); }
               render();
             }, 30);
           }, 30);
@@ -4553,6 +4579,7 @@ if (typeof window !== "undefined") {
             els.generateBtn.disabled = false;
             els.exportBtn.disabled = false;
             updateTabCounts();
+            if (activeTab === "players") { activeTab = "proj"; els.tabbar.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "proj")); }
             render();
           }, 30);
         }, 30);
@@ -4908,6 +4935,8 @@ if (typeof window !== "undefined") {
           : state.results.large.map((r, i) => renderLineupCard(r.arr, i, { bringBack: r.bringBack, showBadges: true, ownField: "ownLarge", leverageScore: lineupLeverageScore(r.arr, meta), leverageMeta: meta })).join("");
         html = renderMetricBanner(meta) + cards;
       }
+    } else if (activeTab === "players") {
+      html = renderPlayersTab();
     } else if (activeTab === "simbuilt") {
       html = renderSimBuiltTab();
     } else if (activeTab === "exposure") {
@@ -4925,6 +4954,106 @@ if (typeof window !== "undefined") {
     els.content.innerHTML = html;
     if (activeTab === "simulate") { wireSimulateTabControls(); wireAttributionControls(); wireStackScan(); }
     if (activeTab === "simbuilt") wireSimBuild();
+    if (activeTab === "players") wirePlayersTab();
+  }
+
+  function showPlayersTab() {
+    activeTab = "players";
+    els.tabbar.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === "players"));
+    render();
+  }
+
+  /* ---------------- Players tab: see and edit the loaded projections ---------------- */
+  function plBaseOf(p) { return (state.basePlayers || []).find(b => b.id === p.id) || p; }
+
+  function plApplyAndRefresh() {
+    state.players = applyEdits(state.basePlayers);
+    renderPlayersTable();
+    const n = document.getElementById("plEditCount");
+    if (n) n.textContent = state.edits.size ? `${state.edits.size} player${state.edits.size === 1 ? "" : "s"} edited` : "No edits";
+    const note = document.getElementById("plStale");
+    if (note) note.style.display = state.edits.size && (state.results.proj || state.results.small) ? "block" : "none";
+  }
+
+  function plCommit(name, field, raw) {
+    const base = (state.basePlayers || []).find(b => b.name === name);
+    if (!base) return;
+    const v = parseFloat(raw);
+    const e = state.edits.get(name) || {};
+    if (raw === "" || isNaN(v) || v < 0) { /* ignore invalid; table re-renders with the stored value */ plApplyAndRefresh(); return; }
+    if (field === "proj") {
+      const ratio = base.proj > 0 ? v / base.proj : 1;
+      e.proj = v;
+      if (!e.ceilTouched && !isNaN(base.ceiling)) e.ceiling = base.proj > 0 ? Math.max(v, base.ceiling * ratio) : Math.max(v, base.ceiling);
+      if (!isNaN(base.floor)) e.floor = base.proj > 0 ? base.floor * ratio : base.floor;
+    } else if (field === "ceiling") {
+      e.ceiling = v; e.ceilTouched = true;
+    } else if (field === "own") {
+      e.own = v;
+      if (!e.largeTouched && base.ownLarge === base.own) e.ownLarge = v;
+    } else if (field === "ownLarge") {
+      e.ownLarge = v; e.largeTouched = true;
+    }
+    // back to the file's numbers in every field: drop the edit
+    const same = ["proj", "ceiling", "own", "ownLarge"].every(k => e[k] === undefined || Math.abs(e[k] - base[k]) < 1e-9 || (isNaN(e[k]) && isNaN(base[k])));
+    if (same) state.edits.delete(name); else state.edits.set(name, e);
+    plApplyAndRefresh();
+  }
+
+  function renderPlayersTab() {
+    if (!state.players) return `<div class="empty-state"><div class="big">No projections yet</div>Upload a projections file in Step 1 and the players will show up here, where you can edit any projection, ceiling or ownership before building.</div>`;
+    const isSd = state.contestType === "showdown";
+    const posList = ["ALL", ...[...new Set(state.players.map(p => p.position))].sort((x, y) => (["QB", "RB", "WR", "TE", "K", "DST"].indexOf(x) + 99) % 99 - (["QB", "RB", "WR", "TE", "K", "DST"].indexOf(y) + 99) % 99)];
+    const teams = ["ALL", ...[...new Set(state.players.map(p => p.team))].sort()];
+    const chip = (key, val, label) => `<button type="button" class="platform-chip${state.pl[key] === val ? " selected" : ""}" data-pl-${key}="${escapeHtml(val)}">${escapeHtml(label)}</button>`;
+    return `<div class="sim-intro"><b>Players &amp; projections.</b> Everything loaded from your file is here. Click any <b>Proj</b>, <b>Ceil</b> or <b>Own</b> number to change it; edited numbers are highlighted and feed every build and simulation. Changing a projection scales that player's ceiling and floor with it (edit Ceil afterwards to set it yourself). ${isSd ? "Showdown values are for the FLEX slot; the captain scores 1.5× and costs 1.5×." : ""}</div>
+      <div class="platform-row" style="flex-wrap:wrap;margin-top:0;"><input type="search" id="plSearch" placeholder="Search players or teams" value="${escapeHtml(state.pl.q)}" style="flex:1 1 180px; min-width:140px;">
+        <span class="slider-note" id="plEditCount" style="align-self:center;">${state.edits.size ? `${state.edits.size} player${state.edits.size === 1 ? "" : "s"} edited` : "No edits"}</span>
+        <button type="button" class="platform-chip" id="plResetAll">Reset all edits</button></div>
+      <div class="platform-row" style="flex-wrap:wrap;margin-top:6px;">${posList.map(p => chip("pos", p, p)).join("")}</div>
+      <div class="platform-row" style="flex-wrap:wrap;margin-top:6px;">${teams.map(t => chip("team", t, t)).join("")}</div>
+      <div id="plStale" class="slider-note" style="display:none;margin:8px 0;">Edits apply the next time you press Generate. Lineups already on screen were built from the earlier numbers.</div>
+      <div style="overflow-x:auto"><table class="sim-table pl-table"><thead id="plHead"></thead><tbody id="plBody"></tbody></table></div>`;
+  }
+
+  function renderPlayersTable() {
+    const body = document.getElementById("plBody"), head = document.getElementById("plHead");
+    if (!body || !state.players) return;
+    const f = state.pl, isSd = state.contestType === "showdown";
+    const hasLarge = state.players.some(p => Math.abs((p.ownLarge || 0) - (p.own || 0)) > 0.05);
+    const q = f.q.trim().toLowerCase();
+    const val = (p) => p.salary ? p.proj / (p.salary / 1000) : 0;
+    let rows = state.players.filter(p => (f.pos === "ALL" || p.position === f.pos) && (f.team === "ALL" || p.team === f.team) && (!q || p.name.toLowerCase().includes(q) || p.team.toLowerCase() === q));
+    const get = (p) => f.sortKey === "val" ? val(p) : p[f.sortKey];
+    rows.sort((x, y) => { const a = get(x), b = get(y); return (typeof a === "string" ? a.localeCompare(b) : (a || 0) - (b || 0)) * f.sortDir; });
+    const th = (k, label, num) => `<th class="sortable-th${f.sortKey === k ? " active" : ""}${num ? " num" : ""}" data-pl-sort="${k}">${label}${f.sortKey === k ? (f.sortDir > 0 ? " ▲" : " ▼") : ""}</th>`;
+    head.innerHTML = `<tr>${th("name", "Player")}<th>Pos</th>${th("team", "Team")}${th("salary", isSd ? "Salary (FLEX)" : "Salary", 1)}${th("proj", "Proj", 1)}${th("ceiling", "Ceil", 1)}${th("val", "Value", 1)}${th("own", hasLarge ? "Own (Small)" : "Own %", 1)}${hasLarge ? th("ownLarge", "Own (Large)", 1) : ""}<th></th></tr>`;
+    const inp = (name, field, v, step) => `<input class="pl-in${state.edits.get(name) && state.edits.get(name)[field] !== undefined && Math.abs(state.edits.get(name)[field] - plBaseByName(name)[field]) > 1e-9 ? " edited" : ""}" type="number" step="${step}" min="0" data-pl-edit="${field}" data-pl-name="${escapeHtml(name)}" value="${Number.isFinite(v) ? +(+v).toFixed(2) : ""}">`;
+    body.innerHTML = rows.length ? rows.map(p => `<tr${state.edits.has(p.name) ? ' class="pl-edited"' : ""}>
+      <td class="bucket-label">${escapeHtml(p.name)}</td><td>${escapeHtml(p.position)}</td><td>${escapeHtml(p.team)}${p.opp ? ` <small style="opacity:.6">v ${escapeHtml(p.opp.replace("@", ""))}</small>` : ""}</td>
+      <td class="num">$${p.salary.toLocaleString()}${isSd ? `<br><small style="opacity:.6">CPT $${Math.round(p.salary * 1.5).toLocaleString()}</small>` : ""}</td>
+      <td class="num">${inp(p.name, "proj", p.proj, 0.1)}</td><td class="num">${inp(p.name, "ceiling", p.ceiling, 0.1)}</td>
+      <td class="num">${val(p).toFixed(2)}</td>
+      <td class="num">${inp(p.name, "own", p.own, 0.5)}</td>${hasLarge ? `<td class="num">${inp(p.name, "ownLarge", p.ownLarge, 0.5)}</td>` : ""}
+      <td>${state.edits.has(p.name) ? `<button type="button" class="pl-undo" data-pl-undo="${escapeHtml(p.name)}" title="Undo edits">↺</button>` : ""}</td></tr>`).join("")
+      : `<tr><td colspan="9" class="empty">No players match these filters.</td></tr>`;
+    body.querySelectorAll("[data-pl-edit]").forEach(i => i.addEventListener("change", () => plCommit(i.dataset.plName, i.dataset.plEdit, i.value)));
+    body.querySelectorAll("[data-pl-undo]").forEach(b => b.addEventListener("click", () => { state.edits.delete(b.dataset.plUndo); plApplyAndRefresh(); }));
+    head.querySelectorAll("[data-pl-sort]").forEach(h => h.addEventListener("click", () => {
+      const k = h.dataset.plSort; state.pl.sortDir = state.pl.sortKey === k ? -state.pl.sortDir : (k === "name" || k === "team" ? 1 : -1); state.pl.sortKey = k; renderPlayersTable();
+    }));
+  }
+  function plBaseByName(name) { return (state.basePlayers || []).find(b => b.name === name) || {}; }
+
+  function wirePlayersTab() {
+    renderPlayersTable();
+    const s = document.getElementById("plSearch");
+    if (s) s.addEventListener("input", () => { state.pl.q = s.value; renderPlayersTable(); });
+    document.querySelectorAll("[data-pl-pos]").forEach(b => b.addEventListener("click", () => { state.pl.pos = b.dataset.plPos; render(); }));
+    document.querySelectorAll("[data-pl-team]").forEach(b => b.addEventListener("click", () => { state.pl.team = b.dataset.plTeam; render(); }));
+    const r = document.getElementById("plResetAll");
+    if (r) r.addEventListener("click", () => { state.edits.clear(); plApplyAndRefresh(); render(); });
+    if (state.edits.size) plApplyAndRefresh();
   }
 
   function emptyResultNotice(tab) {

@@ -5804,7 +5804,7 @@ if (typeof window !== "undefined") {
   function sbSettings() {
     const num = (id, d) => { const e = document.getElementById(id); const v = e ? parseInt(e.value, 10) : NaN; return Number.isFinite(v) ? v : d; };
     const rb = document.getElementById("rankBy");
-    return { metric: rb ? rb.value : "blend", count: Math.max(1, Math.min(150, num("bestN", 20))), sharp: num("sharp", 35), cons: num("consensus", 15), fieldPct: num("fieldRes", 35), runs: Math.min(2500, num("simIters", 1000)), maxStack: Math.max(2, Math.min(6, num("sbStack", 5))), teams: (state.sbTeams || []).slice() };
+    return { metric: rb ? rb.value : "blend", count: Math.max(1, Math.min(150, num("bestN", 20))), sharp: num("sharp", 35), cons: num("consensus", 15), fieldPct: num("fieldRes", 35), runs: Math.min(5000, num("simIters", 1000)), maxStack: Math.max(2, Math.min(6, num("sbStack", 5))), teams: (state.sbTeams || []).slice() };
   }
 
   function sbTeamList() {

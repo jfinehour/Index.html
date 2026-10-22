@@ -932,6 +932,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
   .hero { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 560px) { .brand h1 { font-size: 30px; } .brand .football-icon { width: 56px; } .hero-cards { grid-template-columns: 1fr; } .scroll { max-height: 520px; } }
+[hidden] { display: none !important; }
 </style>
 </head>
 <body>
@@ -5469,7 +5470,7 @@ if (typeof window !== "undefined") {
     const minN = state.attrMinN || 3;
     const filtered = rows.filter(r => r.n >= minN).sort((a, b) => b[sortKey] - a[sortKey]);
     const shown = filtered.slice(0, 40);
-    const th = (label, key) => `<th class="sortable-th${sortKey === key ? " active" : ""}" data-attr-sort="${key}">${label}${sortKey === key ? " ▼" : ""}</th>`;
+    const th = (label, key) => `<th class="sortable n" data-attr-sort="${key}"${sortKey === key ? ' data-dir="▼"' : ""}>${label}</th>`;
     const body = shown.map(r => `<tr>
       <td>${escapeHtml(r.label)}${r.sub ? ` <span style="opacity:.6">${escapeHtml(r.sub)}</span>` : ""}</td>
       <td class="num">${r.n}</td>
@@ -5478,18 +5479,16 @@ if (typeof window !== "undefined") {
       <td class="num">${fmtNum(r.cash)}%</td>
       <td class="num">${r.cashDelta >= 0 ? "+" : ""}${fmtNum(r.cashDelta)}</td>
     </tr>`).join("");
-    return `<div class="sim-intro" style="margin-top:20px;">
-      <b>What's driving the results?</b> For each ${view === "players" ? "player" : "stack"}, this averages the simulated results of every lineup it appears in (<b>ROI %</b>, <b>Cash</b>) and compares them to lineups without it (<b>ΔROI</b> in points of entry fee, <b>ΔCash</b> in percentage points). Across your ${att.N} optimizer lineups (Sim-Built lineups are left out, since they were picked by this same simulation), the average cash rate is ${fmtNum(att.cashAll)}%.<br><br>
-      <b>Read with care:</b> this is descriptive, not causal. Players come bundled — a QB's lineups share his stack and teammates, and lineups overlap heavily — so a player can look good just because he rides with a good stack, and low-count rows are noise (ROI is extremely top-heavy). Trust rows with a higher lineup count and lean on the Cash columns, which are steadier.
-    </div>
-    <div class="platform-row" style="margin-top:0;">
-      <button type="button" class="platform-chip${view === "players" ? " selected" : ""}" data-attr-view="players">Players</button>
-      <button type="button" class="platform-chip${view === "stacks" ? " selected" : ""}" data-attr-view="stacks">Stacks</button>
-      ${[2, 3, 5, 8].map(n => `<button type="button" class="platform-chip${minN === n ? " selected" : ""}" data-attr-min="${n}">Min ${n} lineups</button>`).join("")}
-    </div>
-    ${shown.length ? `<div style="overflow-x:auto"><table class="sim-table">
-      <thead><tr><th>${view === "players" ? "Player" : "Stack"}</th>${th("Lineups", "n")}${th("Avg ROI", "roi")}${th("ΔROI vs without", "roiDelta")}${th("Avg Cash", "cash")}${th("ΔCash", "cashDelta")}</tr></thead>
-      <tbody>${body}</tbody></table></div>` : `<div class="empty-state">Nothing meets the minimum lineup count — lower it above.</div>`}`;
+    const cn = c ? escapeHtml(c.label) : "the first contest";
+    return `<div class="drivers"><h3>Which ${view === "players" ? "players" : "stacks"} drive your ROI</h3>
+      <div class="simnote" style="margin:0 0 10px">For each ${view === "players" ? "player" : "stack"}: the average result of your lineups that include it (<b>ROI %</b>, <b>Cash</b>, in <b>${cn}</b>) against the lineups without it (<b>ΔROI</b> in points of entry fee, <b>ΔCash</b> in percentage points). Based on your ${att.N} lineups. This is descriptive, not causal: players come bundled with their stack, and rows with few lineups are mostly noise, so lean on the Cash columns and higher counts.</div>
+      <div class="chips" style="margin-bottom:10px">
+        <button type="button" class="chip" aria-pressed="${view === "players"}" data-attr-view="players">Players</button>
+        <button type="button" class="chip" aria-pressed="${view === "stacks"}" data-attr-view="stacks">Stacks</button>
+        ${[2, 3, 5, 8].map(n => `<button type="button" class="chip" aria-pressed="${minN === n}" data-attr-min="${n}">Min ${n} lineups</button>`).join("")}
+      </div>
+      ${shown.length ? `<div class="scroll" style="max-height:420px"><table class="plain"><thead><tr><th>${view === "players" ? "Player" : "Stack"}</th>${th("Lineups", "n")}${th("Avg ROI", "roi")}${th("ΔROI vs without", "roiDelta")}${th("Avg Cash", "cash")}${th("ΔCash", "cashDelta")}</tr></thead>
+      <tbody>${shown.map(r => `<tr><td>${escapeHtml(r.label)}${r.sub ? ` <small class="tm">${escapeHtml(r.sub)}</small>` : ""}</td><td class="n">${r.n}</td><td class="n"><span class="${r.roi >= 0 ? "pos-val" : "neg-val"}">${r.roi >= 0 ? "+" : ""}${fmtNum(r.roi)}%</span></td><td class="n"><span class="${r.roiDelta >= 0 ? "pos-val" : "neg-val"}">${r.roiDelta >= 0 ? "+" : ""}${fmtNum(r.roiDelta)}</span></td><td class="n">${fmtNum(r.cash)}%</td><td class="n"><span class="${r.cashDelta >= 0 ? "pos-val" : "neg-val"}">${r.cashDelta >= 0 ? "+" : ""}${fmtNum(r.cashDelta)}</span></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">Nothing meets the minimum lineup count. Lower it above.</div>`}</div>`;
   }
 
   function wireAttributionControls() {
@@ -6502,7 +6501,7 @@ if (typeof window !== "undefined") {
       stats.hidden = false;
       stats.innerHTML = CT.map((c, ci) => [[`${c.short} avg robust ROI`, sgnPct(avg(`c${ci}.roi`))], [`${c.short} best robust ROI`, sgnPct(Math.max(...rows.map(r => val(r, `c${ci}.roi`))))], [`${c.short} avg cash`, pctFmt(avg(`c${ci}.cash`))], [`${c.short} avg top 1%`, pctFmt(avg(`c${ci}.top1`))], [`${c.short} avg win`, pctFmt(avg(`c${ci}.win`))]]).flat().concat([["Avg sim score", fmtNum(avg("mean"))]]).map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
       sortRows(rows, state.simSort, val);
-      note.innerHTML += driversHTML(R, R.mine.map(m => m));
+      note.innerHTML += driversHTML(R, R.mine.map(m => m)) + renderSimAttribution();
       const lo = Math.min(...rows.map(r => r.p10)), hi = Math.max(...rows.map(r => r.p99)); const X = (v) => ((v - lo) / (hi - lo || 1) * 100).toFixed(1);
       const cth = (k, t, first) => thS(k, t, state.simSort).replace('class="sortable n"', `class="sortable n${first ? " cg" : ""}"`);
       const ncol = 7 + CT.length * 5;
@@ -6514,7 +6513,6 @@ if (typeof window !== "undefined") {
           <td><span class="dist" title="10th ${fmtNum(r.p10)} · median ${fmtNum(r.p50)} · 90th ${fmtNum(r.p90)} · 99th ${fmtNum(r.p99)}"><i style="left:${X(r.p10)}%;width:${(X(r.p99) - X(r.p10)).toFixed(1)}%"></i><b style="left:${X(r.p10)}%;width:${(X(r.p90) - X(r.p10)).toFixed(1)}%"></b><u style="left:${X(r.p50)}%"></u></span></td>
           <td class="n">${fmtNum(r.p99)}</td>` + r.c.map(x => `<td class="n cg">${pctFmt(x.cashRatePct)}</td><td class="n">${pctFmt(x.top1Pct)}</td><td class="n">${pctFmt(x.winPct)}</td><td class="n">${roiCell(x.roiCappedPct)}</td><td class="n">${roiCell(x.roiPct)}</td>`).join("") + "</tr>" +
           (state.whyOpen === r.i ? `<tr class="why-row"><td colspan="${ncol}">${whyHTML(R, r)}</td></tr>` : "")).join("") + "</tbody></table>";
-      extra.innerHTML = renderSimAttribution();
       wireAttributionControls();
     } else if (state.simTab === "players") {
       const sd = R.sd, rows = R.players.slice();

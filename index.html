@@ -1033,6 +1033,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
 <div id="mainWrap">
 <nav class="views" aria-label="Sections">
   <button data-view="opt" aria-pressed="true">Optimizer</button>
+  <button data-view="lines" aria-pressed="false">Lineups<span class="vct" id="lineCt"></span></button>
   <button data-view="sim" aria-pressed="false">Simulate<span class="vct" id="simCt"></span></button>
 </nav>
 
@@ -1168,6 +1169,12 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
   </aside>
 </div>
 
+
+</div>
+
+<!-- ===================== LINEUPS ===================== -->
+<div id="lineView" hidden>
+<div class="notice" id="lineEmpty" hidden style="margin:0">No lineups yet. Build some on the Optimizer tab, or add sim optimals and sim-built lineups from the Simulate tab, and they will show up here.</div>
 <section class="panel results" id="results" hidden>
   <div class="panel-h"><h2>Lineups</h2><span class="meta" id="luType"></span>
     <div class="seg" role="tablist" id="resTypeSeg"></div>
@@ -4943,7 +4950,7 @@ if (typeof window !== "undefined") {
   }
 
   /* ---------------- Build: one lineup type at a time ---------------- */
-  const TYPE_LABEL = { proj: "Projection", ceil: "Ceiling", small: "Small Field", large: "Large Field" };
+  const TYPE_LABEL = { proj: "Projection", ceil: "Ceiling", small: "Small Field", large: "Large Field", sim: "Sim-Built", simopt: "Sim Optimal" };
   const isGppType = (t) => t === "small" || t === "large";
   const DEFAULT_MAX_EXP = { proj: 75, ceil: 75, small: 40, large: 30 };
   let building = false;
@@ -4986,9 +4993,9 @@ if (typeof window !== "undefined") {
         const n = (state.results[type] || []).length;
         setStatus(n ? `Built ${n} ${TYPE_LABEL[type]} lineup${n === 1 ? "" : "s"}.` : "No lineups fit those settings.");
       }
+      if (ok && (state.results[type] || []).length) state.view = "lines";
       render();
-      const r = document.getElementById("results");
-      if (ok && r && !r.hidden && window.matchMedia("(max-width: 980px)").matches) r.scrollIntoView({ block: "start" });
+      if (ok) window.scrollTo({ top: 0 });
     }, 30);
   }
 
@@ -5923,6 +5930,7 @@ if (typeof window !== "undefined") {
     } else $("slateInfo").textContent = "NFL DFS optimizer & simulator";
     $("siteLabel").textContent = SITE_LABEL[key];
     $("simSiteLabel").textContent = SITE_LABEL[key];
+    const lc = $("lineCt"); if (lc) { const t = state.resType && state.results[state.resType]; lc.textContent = t && t.length ? String(t.length) : ""; }
     const sc = $("simCt"); if (sc) sc.textContent = state.sim && state.sim.site === key ? "✓" : "";
     sampleBanner();
   }
@@ -6129,8 +6137,10 @@ if (typeof window !== "undefined") {
 
   function renderResults() {
     const box = $("results");
-    const types = ["proj", "ceil", "small", "large"].filter(t => state.results[t] && state.results[t].length >= 0 && state.results[t] !== null);
-    if (!types.length || !state.resType || !state.results[state.resType]) { box.hidden = true; els.exportBtn.disabled = true; return; }
+    const types = ["proj", "ceil", "small", "large", "sim", "simopt"].filter(t => state.results[t] && state.results[t].length >= 0 && state.results[t] !== null);
+    const none = !types.length || !state.resType || !state.results[state.resType];
+    $("lineEmpty").hidden = !none;
+    if (none) { box.hidden = true; els.exportBtn.disabled = true; return; }
     box.hidden = false; els.exportBtn.disabled = false;
     const type = state.resType, gpp = isGppType(type), sd = state.contestType === "showdown", cap = getSalaryCap();
     $("luType").textContent = TYPE_LABEL[type] + (gpp ? " GPP" : "");
@@ -6176,8 +6186,10 @@ if (typeof window !== "undefined") {
     renderHeader();
     if (!state.players) return;
     $("optView").hidden = state.view !== "opt";
+    $("lineView").hidden = state.view !== "lines";
     $("simView").hidden = state.view !== "sim";
-    if (state.view === "opt") { renderPoolControls(); renderPlayersTable(); renderResults(); renderRules(); }
+    if (state.view === "opt") { renderPoolControls(); renderPlayersTable(); renderRules(); }
+    else if (state.view === "lines") renderResults();
     else renderSim();
   }
 
@@ -6520,9 +6532,9 @@ if (typeof window !== "undefined") {
       foot.innerHTML = `<span class="meta">Add the most frequent sim optimals to your lineups, then run the simulation again to score them.</span><span class="keep">Add top <input type="number" id="addN" min="1" max="${L.length}" value="${Math.min(20, L.length)}" aria-label="Number of sim optimals to add"></span><button class="btn primary" id="addBtn">Add to my lineups</button>`;
       $("addBtn").onclick = () => {
         const n = Math.max(1, Math.min(L.length, +$("addN").value || 1));
-        state.results.simopt = L.slice(0, n).map(x => x.arr); state.resType = "simopt"; state.resultsSite = siteKey();
+        state.results.simopt = L.slice(0, n).map(x => x.arr); state.resType = "simopt"; state.resultsSite = siteKey(); state.view = "lines";
         if (state.sim) state.sim.mineStale = true;
-        notify("ok", `Added <b>${n}</b> sim-optimal lineup${n === 1 ? "" : "s"} as <b>Sim Optimal</b> lineups. They're on the Optimizer tab, in your export and in "Your lineups" on the next run.`);
+        notify("ok", `Added <b>${n}</b> sim-optimal lineup${n === 1 ? "" : "s"} as <b>Sim Optimal</b> lineups. They're on the Lineups tab, in your export and in "Your lineups" on the next run.`);
         render();
       };
     }
@@ -6549,8 +6561,8 @@ if (typeof window !== "undefined") {
     body.innerHTML = `<table class="simt"><thead><tr>${th("idx", "#", false)}<th>Lineup</th>${th("oosCash", "Cash")}${th("oosCap", "Robust ROI")}${th("oosRoi", "Raw ROI")}${th("median", "Median rank")}<th class="n">Best rank</th></tr></thead><tbody>` +
       rows.map(r => `<tr><td class="rank">${String(r.idx + 1).padStart(3, "0")}</td><td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="Sim-Built|${r.idx + 1}">Sim-Built #${r.idx + 1}</a>${namesOf(orderForNames(r.arr, sd))}</td><td class="n">${pctFmt(r.oosCash)}</td><td class="n">${roiCell(r.oosCap)}</td><td class="n">${roiCell(r.oosRoi)}</td><td class="n">${r.median.toLocaleString()}</td><td class="n">${r.best.toLocaleString()}</td></tr>`).join("") + "</tbody></table>";
     foot.hidden = false;
-    foot.innerHTML = `<span class="meta">Sim-built lineups are on the Optimizer tab as their own set, ready to export.</span><button class="btn primary" id="viewBuilt">View on Optimizer tab</button>`;
-    $("viewBuilt").onclick = () => { state.resType = "sim"; state.resultsSite = siteKey(); state.view = "opt"; render(); window.scrollTo({ top: 0 }); };
+    foot.innerHTML = `<span class="meta">Sim-built lineups are on the Lineups tab as their own set, ready to export.</span><button class="btn primary" id="viewBuilt">View on Lineups tab</button>`;
+    $("viewBuilt").onclick = () => { state.resType = "sim"; state.resultsSite = siteKey(); state.view = "lines"; render(); window.scrollTo({ top: 0 }); };
     body.querySelectorAll("th.sortable").forEach(h => h.addEventListener("click", () => { state.sbSort = h.dataset.k; renderSimBuiltPane(); }));
   }
 

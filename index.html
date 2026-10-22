@@ -1272,6 +1272,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
           <div class="field"><label for="bestN">Lineups to keep</label><input type="number" id="bestN" min="1" max="150" value="20"></div>
           <div class="field"><label for="sbStack">Max stack size</label><input type="number" id="sbStack" min="2" max="6" value="5"></div>
         </div>
+        <div class="field"><label for="sbPasses">Stability</label><select id="sbPasses" class="sel"><option value="1" selected>1 pass (fastest)</option><option value="3">3 passes (about 3x slower)</option><option value="5">5 passes (about 5x slower)</option></select><span class="hint">Each extra pass scores candidates against another sampled field and another set of random slates, then averages. Slower; in testing it did not clearly make picks steadier.</span></div>
         <div class="field"><label for="rankBy">Pick by</label><select id="rankBy" class="sel"><option value="blend">Blend of cash rate and robust ROI</option><option value="roi">Robust ROI</option><option value="cash">Cash rate</option></select></div>
         <div class="field"><span class="flabel" id="sbTeamLbl">Teams to stack</span><div class="team-chip-grid" id="sbTeams"></div></div>
         <span class="hint">Follows your Optimizer locks, excludes, max per team, min salary and TE-in-FLEX settings.</span>
@@ -5509,15 +5510,15 @@ if (typeof window !== "undefined") {
   }
 
   /** Builds (or reuses a cached) synthetic opponent field for the given contest. */
-  function getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown }) {
+  function getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed = 1 }) {
     const fieldPlayers = state.generationPool || state.players;
-    const fieldKey = [c.totalEntries, fieldSampleSize, sharpShare, consensusShare, isShowdown, getSalaryCap()].join("|");
+    const fieldKey = [c.totalEntries, fieldSampleSize, sharpShare, consensusShare, isShowdown, getSalaryCap(), seed].join("|");
     let field;
     if (state.fieldCache && state.fieldCache.players === fieldPlayers && state.fieldCache.key === fieldKey) {
       field = state.fieldCache.field; // same inputs as last run — reuse the built field
     } else {
       field = eng.buildSyntheticField(fieldPlayers, {
-        totalEntries: c.totalEntries, fieldSampleSize, seed: 1, sharpShare, consensusShare,
+        totalEntries: c.totalEntries, fieldSampleSize, seed, sharpShare, consensusShare,
         ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
       });
       state.fieldCache = { players: fieldPlayers, key: fieldKey, field };
@@ -5600,6 +5601,7 @@ if (typeof window !== "undefined") {
     const sbs = sbSettings();
     const metric = sbs.metric;
     const nTarget = sbs.count;
+    const passes = sbs.passes;
     const sharpShare = sbs.sharp / 100;
     const consensusShare = sbs.cons / 100;
     const fieldSampleSize = resolveFieldSize(sbs.fieldPct, c.totalEntries);
@@ -5641,33 +5643,48 @@ if (typeof window !== "undefined") {
     stages.push(() => {
       statusEl.textContent = "Building a broad candidate pool…";
       existingRaw.forEach(addCand);
+      for (let pp = 0; pp < passes; pp++) {
       if (isShowdown) {
         const sel = ctx.allowedTeams ? [...ctx.allowedTeams] : null;
         const cfg = (n) => ({ configs: sel ? sel.map(t => ({ count: n, team: t })) : [{ count: n, team: null }] });
         const gens = [sel ? cfg(3) : null, cfg(5), cfg(4), cfg(3)];
         gens.forEach((structure, gi) => {
-          eng.generateShowdownCorrelated(pool, gi === 0 ? 120 : 50, { ...baseGen, poolAttempts: 2500, seed: 31 + gi, structure }).forEach(r => addCand(r.arr));
+          eng.generateShowdownCorrelated(pool, gi === 0 ? 120 : 50, { ...baseGen, poolAttempts: 2500, seed: 31 + gi + pp * 1000, structure }).forEach(r => addCand(r.arr));
         });
       } else {
         const gcommon = { ...baseGen, flexEligible, vegasContext: state.vegasContext, maxMainTeam: genMain, maxOtherTeam: genOther, secondaryStackSize: 0, tertiaryStackSize: 0 };
-        eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
+        eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31 + pp * 1000, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
         const qbs = pool.filter(p => p.position === "QB");
         const topQb = Math.max(...qbs.map(p => p.proj), 0);
         const teams = [...new Set(qbs.filter(p => p.proj >= 0.6 * topQb).map(p => p.team))];
         teams.forEach((t, ti) => {
           for (const size of [2, 3].filter(z => z <= ctx.maxStack)) for (const bb of [0, 1]) {
-            try { eng.generateCorrelatedLineups(pool, 3, { ...gcommon, poolAttempts: 500, seed: 40 + ti, bringBackShare: bb, stackTeams: [t], stackSize: size }).forEach(r => addCand(r.arr)); } catch (e) { /* skip */ }
+            try { eng.generateCorrelatedLineups(pool, 3, { ...gcommon, poolAttempts: 500, seed: 40 + ti + pp * 1000, bringBackShare: bb, stackTeams: [t], stackSize: size }).forEach(r => addCand(r.arr)); } catch (e) { /* skip */ }
           }
         });
       }
+      }
     });
-    let field, scorer, scored = [], simBase;
-    stages.push(() => {
-      statusEl.textContent = `Scoring ${cands.size.toLocaleString()} candidates in the contest simulation…`;
-      field = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown });
+    let field, fields, evalMany, scorer, scored = [], simBase;
+    stages.push(async () => {
+      statusEl.textContent = `Scoring ${cands.size.toLocaleString()} candidates in the contest simulation${passes > 1 ? " (" + passes + " passes, each with its own field and random slates)" : ""}…`;
+      // each pass gets its own sampled opponent field and its own random slates; results are averaged
+      fields = [];
+      for (let pp = 0; pp < passes; pp++) fields.push(getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 1 + pp }));
+      field = fields[0];
       simBase = { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations, vegasContext: state.vegasContext };
+      evalMany = async (arrs) => {
+        let acc = null;
+        for (let pp = 0; pp < passes; pp++) {
+          if (pp > 0) { statusEl.textContent = `Pass ${pp + 1} of ${passes}…`; await new Promise(r => setTimeout(r, 15)); }
+          const r = eng.simulateContestROIMulti(arrs, fields[pp], { ...simBase, seed: 101 + pp });
+          if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes }));
+          else r.forEach((x, i) => { acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; });
+        }
+        return acc;
+      };
       const list = [...cands.values()];
-      const res = eng.simulateContestROIMulti(list.map(x => simArr(x.arr)), field, { ...simBase, seed: 101 });
+      const res = await evalMany(list.map(x => simArr(x.arr)));
       list.forEach((x, i) => { x.res = res[i]; });
       // scorer: z-scores of cash and winsorized ROI over the initial pool
       const cashs = res.map(r => r.cashRatePct), rois = res.map(r => r.roiPct).sort((x, y) => x - y);
@@ -5682,7 +5699,7 @@ if (typeof window !== "undefined") {
       list.forEach(x => { x.score = scorer(x.res); });
     });
     for (let round = 1; round <= 2; round++) {
-      stages.push(() => {
+      stages.push(async () => {
         statusEl.textContent = `Improving the best lineups with simulation-checked player swaps (round ${round}/2)…`;
         const list = [...cands.values()].sort((x, y) => y.score - x.score).slice(0, 14);
         const fresh = [];
@@ -5691,7 +5708,7 @@ if (typeof window !== "undefined") {
           if (!cands.has(s)) { const o = { arr: nb, sig: s }; cands.set(s, o); fresh.push(o); }
         }
         if (!fresh.length) return;
-        const res = eng.simulateContestROIMulti(fresh.map(x => simArr(x.arr)), field, { ...simBase, seed: 101 });
+        const res = await evalMany(fresh.map(x => simArr(x.arr)));
         fresh.forEach((x, i) => { x.res = res[i]; x.score = scorer(res[i]); });
       });
     }
@@ -5731,7 +5748,8 @@ if (typeof window !== "undefined") {
       const base = existingRaw.map(simArr), mine = picked.map(x => simArr(x.arr));
       // Validate on fresh slates with 3x the runs (less noise), then ORDER the picks by that
       // validated score — the selection-time ranking carries luck from the search itself.
-      const oos = eng.simulateContestROIMulti([...mine, ...base], field, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 });
+      const oosField = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 99 });
+      const oos = eng.simulateContestROIMulti([...mine, ...base], oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 });
       let oosMine = oos.slice(0, mine.length);
       const oosBase = oos.slice(mine.length);
       const order = picked.map((_, i) => i).sort((i, j) => scorer(oosMine[j]) - scorer(oosMine[i]));
@@ -5762,8 +5780,7 @@ if (typeof window !== "undefined") {
       }
       const stage = stages[si++];
       setTimeout(() => {
-        try { stage(); } catch (err) { statusEl.textContent = "Error: " + err.message; statusEl.className = "status-line err"; btn.disabled = false; return; }
-        next();
+        Promise.resolve().then(() => stage()).then(next, (err) => { console.error(err); statusEl.textContent = "Error: " + err.message; statusEl.className = "status-line err"; btn.disabled = false; });
       }, 20);
     }
     next();
@@ -5804,7 +5821,7 @@ if (typeof window !== "undefined") {
   function sbSettings() {
     const num = (id, d) => { const e = document.getElementById(id); const v = e ? parseInt(e.value, 10) : NaN; return Number.isFinite(v) ? v : d; };
     const rb = document.getElementById("rankBy");
-    return { metric: rb ? rb.value : "blend", count: Math.max(1, Math.min(150, num("bestN", 20))), sharp: num("sharp", 35), cons: num("consensus", 15), fieldPct: num("fieldRes", 35), runs: Math.min(5000, num("simIters", 1000)), maxStack: Math.max(2, Math.min(6, num("sbStack", 5))), teams: (state.sbTeams || []).slice() };
+    return { metric: rb ? rb.value : "blend", count: Math.max(1, Math.min(150, num("bestN", 20))), sharp: num("sharp", 35), cons: num("consensus", 15), fieldPct: num("fieldRes", 35), runs: Math.min(5000, num("simIters", 1000)), maxStack: Math.max(2, Math.min(6, num("sbStack", 5))), passes: Math.max(1, Math.min(5, num("sbPasses", 1))), teams: (state.sbTeams || []).slice() };
   }
 
   function sbTeamList() {

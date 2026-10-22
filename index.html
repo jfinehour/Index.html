@@ -5453,11 +5453,11 @@ if (typeof window !== "undefined") {
     return { N, avgAll, cashAll, players, stacks };
   }
 
-  function renderSimAttribution() {
-    const results = (state.contestResults || []).filter(r => r.bucket !== "Sim-Built");
+  function renderSimAttribution(resultsIn, contestIn) {
+    const results = resultsIn || (state.contestResults || []).filter(r => r.bucket !== "Sim-Built");
     if (results.length < 6) return "";
     const att = computeSimAttribution(results);
-    const c = state.contestPresets.find(p => p.id === state.activeContestPresetId);
+    const c = contestIn || state.contestPresets.find(p => p.id === state.activeContestPresetId);
     const fee = c ? c.entryFee : 1;
     const view = state.attrView || "players";
     const sortKey = state.attrSort || "cashDelta";
@@ -5748,6 +5748,7 @@ if (typeof window !== "undefined") {
         rows: picked.map((x, i) => ({ inCash: x.res.cashRatePct, inRoi: x.res.roiPct, oosCash: oosMine[i].cashRatePct, oosRoi: oosMine[i].roiPct, oosCap: oosMine[i].roiCappedPct, median: oosMine[i].medianRank, best: oosMine[i].bestRank, idx: i })),
         oosCash: avg(oosMine, "cashRatePct"), oosRoi: avg(oosMine, "roiPct"), oosCap: avg(oosMine, "roiCappedPct"),
         inCash: avg(picked.map(x => x.res), "cashRatePct"), inRoi: avg(picked.map(x => x.res), "roiPct"), cmp,
+        res: oosMine, contestId: c.id, fieldAvg: fieldAverages(field),
       };
     });
     let si = 0;
@@ -6208,6 +6209,11 @@ if (typeof window !== "undefined") {
   const sgnPct = (x) => (x >= 0 ? "+" : "") + Math.round(x) + "%";
   const sgn1 = (x) => (x >= 0 ? "+" : "") + fmtNum(x);
   const roiCell = (x) => `<span class="${x >= 0 ? "pos-val" : "neg-val"}">${sgnPct(x)}</span>`;
+  function fieldAverages(field) {
+    let fw = 0, fp = 0, fo = 0;
+    field.archetypes.forEach((a, i) => { const w = field.archetypeWeights[i]; fw += w; fp += w * lineupProj(a); fo += w * ownSum(a); });
+    return { proj: fp / fw, own: fo / fw };
+  }
   function lastName(n) {
     const t = String(n).trim().split(/\s+/);
     if (t.length > 1 && /^(jr\.?|sr\.?|ii|iii|iv|v)$/i.test(t[t.length - 1])) return t[t.length - 2];
@@ -6552,6 +6558,12 @@ if (typeof window !== "undefined") {
     stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg robust ROI", sg(B.oosCap) + "%"], ["Avg raw ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
     note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${B.metric === "cash" ? "cash rate" : B.metric === "roi" ? "robust ROI" : "a blend of cash rate and robust ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat raw ROI with suspicion.</div>
       <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Robust ROI</th><th class="n">Raw ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${sg(B.oosCap)}%</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${sg(r.cap)}%</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
+    if (B.res && B.fieldAvg) {
+      const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));
+      const ct = state.contestPresets.find(p => p.id === B.contestId);
+      note.innerHTML += driversHTML({ fieldAvg: B.fieldAvg }, dr) + renderSimAttribution(dr.map(d => ({ bucket: "Sim-Built", arr: d.arr, result: d.c[0] })), ct);
+      wireAttributionControls();
+    }
     const rows = B.rows.map((r, i) => ({ ...r, arr: state.results.sim[i] }));
     const key = state.sbSort || "idx";
     rows.sort((x, y) => key === "idx" ? x.idx - y.idx : key === "median" ? x.median - y.median : y[key] - x[key]);

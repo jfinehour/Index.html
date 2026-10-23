@@ -5766,7 +5766,7 @@ if (typeof window !== "undefined") {
         rows: picked.map((x, i) => ({ inCash: x.res.cashRatePct, inRoi: x.res.roiPct, oosCash: oosMine[i].cashRatePct, oosRoi: oosMine[i].roiPct, oosCap: oosMine[i].roiCappedPct, median: oosMine[i].medianRank, best: oosMine[i].bestRank, idx: i })),
         oosCash: avg(oosMine, "cashRatePct"), oosRoi: avg(oosMine, "roiPct"), oosCap: avg(oosMine, "roiCappedPct"),
         inCash: avg(picked.map(x => x.res), "cashRatePct"), inRoi: avg(picked.map(x => x.res), "roiPct"), cmp,
-        res: oosMine, contestId: c.id, fieldAvg: fieldAverages(field),
+        res: oosMine, contestId: c.id, fieldAvg: fieldAverages(field), oosIters: Math.min(4000, iterations * 3),
       };
     });
     let si = 0;
@@ -6316,6 +6316,8 @@ if (typeof window !== "undefined") {
     $("runSimBuildBtn").addEventListener("click", runSimBuild);
     $("simTabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (!b) return; state.simTab = b.dataset.tab; state.whyOpen = null; renderSim(); });
     $("simBody").addEventListener("click", (e) => {
+      const wbb = e.target.closest("[data-whyb]");
+      if (wbb) { const i = +wbb.dataset.whyb; state.whyOpenB = state.whyOpenB === i ? null : i; renderSim(); return; }
       const wb = e.target.closest("[data-why]");
       if (wb) { const i = +wb.dataset.why; state.whyOpen = state.whyOpen === i ? null : i; renderSim(); return; }
       const t = e.target.closest("th.sortable"); if (!t) return;
@@ -6582,11 +6584,13 @@ if (typeof window !== "undefined") {
       wireAttributionControls();
     }
     const rows = B.rows.map((r, i) => ({ ...r, arr: state.results.sim[i] }));
+    const bct = state.contestPresets.find(p => p.id === B.contestId);
+    const whyR = { fieldAvg: B.fieldAvg, sd, players: [], iters: B.oosIters || 0, contests: [{ name: B.contest || (bct && bct.label) || "the contest", fee: bct ? bct.entryFee : 1 }] };
     const key = state.sbSort || "idx";
     rows.sort((x, y) => key === "idx" ? x.idx - y.idx : key === "median" ? x.median - y.median : y[key] - x[key]);
     const th = (k, t, n = true) => `<th class="sortable${n ? " n" : ""}" data-k="${k}"${key === k ? ' data-dir="▼"' : ""}>${t}</th>`;
-    body.innerHTML = `<table class="simt"><thead><tr>${th("idx", "#", false)}<th>Lineup</th>${th("oosCash", "Cash")}${th("oosCap", "Robust ROI")}${th("oosRoi", "Raw ROI")}${th("median", "Median rank")}<th class="n">Best rank</th></tr></thead><tbody>` +
-      rows.map(r => `<tr><td class="rank">${String(r.idx + 1).padStart(3, "0")}</td><td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="Sim-Built|${r.idx + 1}">Sim-Built #${r.idx + 1}</a>${namesOf(orderForNames(r.arr, sd))}</td><td class="n">${pctFmt(r.oosCash)}</td><td class="n">${roiCell(r.oosCap)}</td><td class="n">${roiCell(r.oosRoi)}</td><td class="n">${r.median.toLocaleString()}</td><td class="n">${r.best.toLocaleString()}</td></tr>`).join("") + "</tbody></table>";
+    body.innerHTML = `<table class="simt"><thead><tr>${th("idx", "#", false)}<th></th><th>Lineup</th>${th("oosCash", "Cash")}${th("oosCap", "Robust ROI")}${th("oosRoi", "Raw ROI")}${th("median", "Median rank")}<th class="n">Best rank</th></tr></thead><tbody>` +
+      rows.map(r => `<tr><td class="rank">${String(r.idx + 1).padStart(3, "0")}</td><td><button class="why-btn" data-whyb="${r.idx}" aria-expanded="${state.whyOpenB === r.idx}">Why</button></td><td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="Sim-Built|${r.idx + 1}">Sim-Built #${r.idx + 1}</a>${namesOf(orderForNames(r.arr, sd))}</td><td class="n">${pctFmt(r.oosCash)}</td><td class="n">${roiCell(r.oosCap)}</td><td class="n">${roiCell(r.oosRoi)}</td><td class="n">${r.median.toLocaleString()}</td><td class="n">${r.best.toLocaleString()}</td></tr>` + (state.whyOpenB === r.idx && B.res ? `<tr class="why-row"><td colspan="8">${whyHTML(whyR, { arr: r.arr, proj: lineupProj(r.arr), c: [B.res[r.idx]] })}</td></tr>` : "")).join("") + "</tbody></table>";
     foot.hidden = false;
     foot.innerHTML = `<span class="meta">Sim-built lineups are on the Lineups tab as their own set, ready to export.</span><button class="btn primary" id="viewBuilt">View on Lineups tab</button>`;
     $("viewBuilt").onclick = () => { state.resType = "sim"; state.resultsSite = siteKey(); state.view = "lines"; render(); window.scrollTo({ top: 0 }); };

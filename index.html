@@ -5094,6 +5094,7 @@ if (typeof window !== "undefined") {
       ? `Highest projected points. Best for cash games and double-ups. No player goes in more than ${d}% of lineups unless you set your own max.`
       : t === "ceil" ? `Highest ceilings, using each player's upside number. No player goes in more than ${d}% of lineups unless you set your own max.`
       : `Ranks players by upside discounted by ownership, with stacks and bring-backs${sd ? " (Showdown: roster structure and game script)" : ""}. Max exposure defaults to ${d}% unless you set your own.`;
+    if (sd && !isGppType(t)) document.getElementById("lineTypeHint").textContent += " Showdown roster structure and game script are only used by Small Field and Large Field GPP. Switch Lineup type to one of those to see them.";
     const mp = document.getElementById("valMinProj"); if (mp) els.sliderMinProj.dispatchEvent(new Event("input"));
   }
 

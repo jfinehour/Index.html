@@ -1251,9 +1251,9 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
             <div class="field"><label for="fieldRes">Field resolution <output id="fieldResOut">35%</output></label><input type="range" id="fieldRes" min="5" max="60" step="1" value="35">
               <span class="hint" id="fieldResHint">Distinct opponent rosters standing in for the real field. Higher is more realistic and slower.</span></div>
             <div class="field"><label for="teamCorr">Team shared variance <output id="teamOut">35%</output></label><input type="range" id="teamCorr" min="0" max="60" step="1" value="35">
-              <span class="hint">A team's offense moves together: the QB and his pass catchers rise and fall as one.</span></div>
+              <span class="hint">Scales how strongly teammates move together. 35% is the baseline. The QB moves with his pass catchers, but two receivers or two RBs on one team compete for the same touchdowns, so they barely move together, and a defense moves against the opposing offense.</span></div>
             <div class="field"><label for="gameCorr">Game shared variance <output id="gameOut">15%</output></label><input type="range" id="gameCorr" min="0" max="40" step="1" value="15">
-              <span class="hint">Pace and game script lift everyone in a game together.</span></div>
+              <span class="hint">Scales how much opposing offenses rise together in a shootout (bring-backs). 15% is the baseline.</span></div>
           </div>
         </details>
       </div>
@@ -2891,6 +2891,126 @@ function splitNormalFromZ(z, meanTarget, floor, ceiling) {
  * Returns: array (same order as `lineups`) of
  *   { mean, median, std, p10, p25, p75, p90, min, max }
  */
+
+/* =====================================================================
+   Position-aware correlation model for slate simulations.
+
+   Instead of one shared team shock (which made EVERY teammate pair about
+   0.5 correlated, including WR-vs-WR and RB-vs-WR, and made a defense move
+   with its own offense), correlations now depend on the pair of positions:
+   a QB moves with his pass catchers, but two receivers on one team split a
+   limited pool of targets and touchdowns, two RBs split carries, and a
+   defense moves AGAINST the opposing offense. Players in the same game also
+   share a mild shootout effect. The numbers below are working estimates in
+   line with published NFL DFS correlation studies; they are scaled by the
+   Team and Game correlation settings (35 / 15 are the baseline).
+   ===================================================================== */
+const CORR_SAME = {
+  QB: { QB: 0, RB: 0.05, WR: 0.46, TE: 0.36, DST: 0.05 },
+  RB: { RB: -0.10, WR: -0.04, TE: -0.03, DST: 0.05 },
+  WR: { WR: 0.06, TE: 0.04, DST: 0.08 },
+  TE: { TE: 0, DST: 0.06 },
+  DST: { DST: 0 },
+};
+const CORR_OPP = {
+  QB: { QB: 0.22, RB: 0.0, WR: 0.18, TE: 0.12, DST: -0.40 },
+  RB: { RB: 0, WR: 0, TE: 0, DST: -0.25 },
+  WR: { WR: 0.10, TE: 0.06, DST: -0.28 },
+  TE: { TE: 0.04, DST: -0.20 },
+  DST: { DST: 0 },
+};
+function pairCorr(table, a, b) {
+  const x = table[a], y = table[b];
+  if (x && x[b] !== undefined) return x[b];
+  if (y && y[a] !== undefined) return y[a];
+  return 0;
+}
+
+/** Builds a sampler of correlated standard-normal draws, one per entry of `list` (distinct players). */
+function makeCorrelatedSampler(list, opts = {}) {
+  const { teamScale = 1, gameScaleFn = null } = opts;
+  const n = list.length;
+  const teamOpp = new Map();
+  for (const p of list) if (p.position !== "DST" && !teamOpp.has(p.team) && p.opp) teamOpp.set(p.team, oppTeam(p));
+  const gameOf = new Map(); // team -> game key
+  const gameTeams = new Map(); // key -> [teamA, teamB]
+  for (const [t, o] of teamOpp) {
+    const key = [t, o].sort().join("-");
+    gameOf.set(t, key); gameOf.set(o, key);
+    if (!gameTeams.has(key)) gameTeams.set(key, [t, o]);
+  }
+  const groups = new Map(); // key -> indices
+  const solo = [];
+  list.forEach((p, i) => { const k = gameOf.get(p.team); if (k === undefined) solo.push(i); else { if (!groups.has(k)) groups.set(k, []); groups.get(k).push(i); } });
+  const blocks = [];
+  for (const [key, idx] of groups) {
+    const m = idx.length;
+    const [tA] = gameTeams.get(key);
+    const gs = gameScaleFn ? gameScaleFn(...gameTeams.get(key)) : 1;
+    const R = Array.from({ length: m }, () => new Float64Array(m));
+    for (let a = 0; a < m; a++) {
+      R[a][a] = 1;
+      for (let b = a + 1; b < m; b++) {
+        const pa = list[idx[a]], pb = list[idx[b]];
+        let r;
+        if (pa.team === pb.team) r = pairCorr(CORR_SAME, pa.position, pb.position) * teamScale;
+        else { r = pairCorr(CORR_OPP, pa.position, pb.position); if (r > 0) r *= gs; }
+        R[a][b] = R[b][a] = r;
+      }
+    }
+    // repair to the nearest valid correlation matrix (clip tiny/negative eigenvalues), then factor it
+    let L = cholesky(R);
+    if (!L) L = cholesky(nearestCorrelation(R)) || R.map((_, i) => Float64Array.from({ length: m }, (_, j) => (i === j ? 1 : 0)));
+    blocks.push({ idx, L, m });
+  }
+  const eps = new Float64Array(64);
+  function draw(rng, out) {
+    for (const i of solo) out[i] = boxMullerZ(rng);
+    for (const bk of blocks) {
+      const { idx, L, m } = bk;
+      const e = m <= eps.length ? eps : new Float64Array(m);
+      for (let k = 0; k < m; k++) e[k] = boxMullerZ(rng);
+      for (let a = 0; a < m; a++) { const La = L[a]; let z = 0; for (let k = 0; k <= a; k++) z += La[k] * e[k]; out[idx[a]] = z; }
+    }
+  }
+  return { n, draw };
+}
+function nearestCorrelation(R) {
+  const m = R.length;
+  const A = R.map(r => Float64Array.from(r)), V = Array.from({ length: m }, (_, i) => Float64Array.from({ length: m }, (_, j) => (i === j ? 1 : 0)));
+  for (let sweep = 0; sweep < 40; sweep++) {
+    let off = 0;
+    for (let p = 0; p < m - 1; p++) for (let q = p + 1; q < m; q++) off += A[p][q] * A[p][q];
+    if (off < 1e-14) break;
+    for (let p = 0; p < m - 1; p++) for (let q = p + 1; q < m; q++) {
+      if (Math.abs(A[p][q]) < 1e-12) continue;
+      const th = (A[q][q] - A[p][p]) / (2 * A[p][q]);
+      const t = Math.sign(th || 1) / (Math.abs(th) + Math.sqrt(th * th + 1)), c = 1 / Math.sqrt(t * t + 1), sn = t * c;
+      for (let k = 0; k < m; k++) { const akp = A[k][p], akq = A[k][q]; A[k][p] = c * akp - sn * akq; A[k][q] = sn * akp + c * akq; }
+      for (let k = 0; k < m; k++) { const apk = A[p][k], aqk = A[q][k]; A[p][k] = c * apk - sn * aqk; A[q][k] = sn * apk + c * aqk; }
+      for (let k = 0; k < m; k++) { const vkp = V[k][p], vkq = V[k][q]; V[k][p] = c * vkp - sn * vkq; V[k][q] = sn * vkp + c * vkq; }
+    }
+  }
+  const lam = Array.from({ length: m }, (_, i) => Math.max(A[i][i], 0.03));
+  const M = Array.from({ length: m }, () => new Float64Array(m));
+  for (let i = 0; i < m; i++) for (let j = 0; j < m; j++) { let v = 0; for (let k = 0; k < m; k++) v += V[i][k] * lam[k] * V[j][k]; M[i][j] = v; }
+  const out = Array.from({ length: m }, () => new Float64Array(m));
+  for (let i = 0; i < m; i++) for (let j = 0; j < m; j++) out[i][j] = i === j ? 1 : M[i][j] / Math.sqrt(M[i][i] * M[j][j]);
+  return out;
+}
+function cholesky(M) {
+  const m = M.length, L = Array.from({ length: m }, () => new Float64Array(m));
+  for (let i = 0; i < m; i++) {
+    for (let j = 0; j <= i; j++) {
+      let sum = M[i][j];
+      for (let k = 0; k < j; k++) sum -= L[i][k] * L[j][k];
+      if (i === j) { if (sum <= 1e-9) return null; L[i][j] = Math.sqrt(sum); }
+      else L[i][j] = sum / L[j][j];
+    }
+  }
+  return L;
+}
+
 function simulateLineups(lineups, opts = {}) {
   const { iterations = 1000, seed = 1, vegasContext = null,
           teamWeight = 0.35, gameWeightBase = 0.15 } = opts;
@@ -3554,25 +3674,23 @@ function simulateContestROIMulti(userLineups, field, opts) {
     bk[li][rank <= 1 ? 0 : rank <= top1Rank ? 1 : rank <= top10Rank ? 2 : 3] += pay;
   };
 
+  // Correlated draws: one per distinct player id, so a player's captain and flex versions move together.
+  const distinct = [...allPlayersById.values()];
+  const distinctIx = new Map(distinct.map((p, i) => [p.id, i]));
+  const zIdx = Int32Array.from(uniqP, p => distinctIx.get(p.id));
+  const zs = new Float64Array(distinct.length);
+  const gameScaleFn = (tA, tB) => {
+    const game = gameOfTeam.get(tA);
+    return gameWeightFor(game) / 0.15;
+  };
+  const sampler = makeCorrelatedSampler(distinct, { teamScale: teamWeight / 0.35, gameScaleFn });
   for (let it = 0; it < iterations; it++) {
-    const teamShock = new Map();
-    for (const t of teams) teamShock.set(t, boxMullerZ(rngSim));
-    const gameShock = new Map();
-    for (const g of games) gameShock.set(g.key, boxMullerZ(rngSim));
-    const playerShock = new Map();
-    for (const id of allPlayersById.keys()) playerShock.set(id, boxMullerZ(rngSim));
+    sampler.draw(rngSim, zs);
 
     // Score each UNIQUE player once per iteration, then sum per lineup.
     for (let k = 0; k < nU; k++) {
       const p = uniqP[k];
-      const game = gameOfTeam.get(p.team);
-      const gw = game ? gameWeightFor(game) : 0;
-      const tw = teamsSet.has(p.team) ? teamWeight : 0;
-      const iw = Math.max(0, 1 - tw - gw);
-      const tShock = teamShock.get(p.team) || 0;
-      const gShock = game ? gameShock.get(game.key) : 0;
-      const iShock = playerShock.get(p.id) || 0;
-      const combinedZ = Math.sqrt(iw) * iShock + Math.sqrt(tw) * tShock + Math.sqrt(gw) * gShock;
+      const combinedZ = zs[zIdx[k]];
       const floorVal = (p.floor != null && !isNaN(p.floor)) ? p.floor : p.proj * 0.5;
       let score = splitNormalFromZ(combinedZ, p.proj, floorVal, p.ceiling);
       if (p.isCaptain) score *= 1.5;
@@ -3834,24 +3952,23 @@ function simulatePlayerScores(players, opts = {}) {
     if (iA == null || iB == null || !vegasContext.avgGameTotal) return gameWeightBase;
     return Math.min(0.35, Math.max(0.05, gameWeightBase * (iA + iB) / vegasContext.avgGameTotal));
   });
-  const cT = new Float64Array(n), cG = new Float64Array(n), cI = new Float64Array(n), tI = new Int32Array(n), gI = new Int32Array(n);
+  const gameScaleFn = (tA, tB) => {
+    if (!vegasContext) return 1;
+    const iA = vegasContext.impliedTotal.get(tA), iB = vegasContext.impliedTotal.get(tB);
+    if (iA == null || iB == null || !vegasContext.avgGameTotal) return 1;
+    return Math.min(0.35, Math.max(0.05, gameWeightBase * (iA + iB) / vegasContext.avgGameTotal)) / gameWeightBase;
+  };
+  const sampler = makeCorrelatedSampler(list, { teamScale: teamWeight / 0.35, gameScaleFn: (a, b) => gameScaleFn(a, b) * (gameWeightBase / 0.15) });
   const mean = new Float64Array(n), flo = new Float64Array(n), cei = new Float64Array(n);
   list.forEach((p, i) => {
-    const ti = teamIx.has(p.team) ? teamIx.get(p.team) : -1, gi = gameIx.has(p.team) ? gameIx.get(p.team) : -1;
-    const g = gi >= 0 ? gw[gi] : 0, t = ti >= 0 ? teamWeight : 0;
-    tI[i] = ti; gI[i] = gi; cG[i] = Math.sqrt(g); cT[i] = Math.sqrt(t); cI[i] = Math.sqrt(Math.max(0, 1 - t - g));
     mean[i] = p.proj; flo[i] = (p.floor != null && !isNaN(p.floor)) ? p.floor : p.proj * 0.5; cei[i] = p.ceiling != null && !isNaN(p.ceiling) ? p.ceiling : p.proj * 1.6;
   });
   const data = new Float32Array(iterations * n);
-  const ts = new Float64Array(teams.length), gs = new Float64Array(games.length);
+  const zs = new Float64Array(n);
   for (let it = 0; it < iterations; it++) {
-    for (let t = 0; t < ts.length; t++) ts[t] = boxMullerZ(rng);
-    for (let g = 0; g < gs.length; g++) gs[g] = boxMullerZ(rng);
+    sampler.draw(rng, zs);
     const row = it * n;
-    for (let i = 0; i < n; i++) {
-      const z = cI[i] * boxMullerZ(rng) + (tI[i] >= 0 ? cT[i] * ts[tI[i]] : 0) + (gI[i] >= 0 ? cG[i] * gs[gI[i]] : 0);
-      data[row + i] = splitNormalFromZ(z, mean[i], flo[i], cei[i]);
-    }
+    for (let i = 0; i < n; i++) data[row + i] = splitNormalFromZ(zs[i], mean[i], flo[i], cei[i]);
   }
   return { n, iters: iterations, players: list, idx: new Map(list.map((p, i) => [p.id, i])), data };
 }

@@ -5626,8 +5626,8 @@ if (typeof window !== "undefined") {
       poolAttempts: 1500, ownershipField: "ownLarge", salaryCap, minSalary, ceilingWeight: parseInt(els.sliderCeilingWeight.value, 10) / 100,
       boosts: ruleBoosts(), ownershipWeight: parseInt(els.sliderLargeOwn.value, 10) / 100, maxExposureFraction: 0.7,
     };
-    const SB = Math.floor(Math.random() * 1e6); // fresh random draws every run, so results vary run to run like real slates would
-    const rng = eng.mulberry32(777 + SB);
+    const SB = Math.floor(Math.random() * 1e6); // fresh random slates and opponent fields every run (the candidate pool itself stays fixed, so picks shift a little rather than completely)
+    const rng = eng.mulberry32(777);
     const existingRaw = [];
     ["proj", "ceil"].forEach(k => (state.results[k] || []).forEach(arr => existingRaw.push(arr)));
     ["small", "large"].forEach(k => (state.results[k] || []).forEach(r => existingRaw.push(r.arr)));
@@ -5650,17 +5650,17 @@ if (typeof window !== "undefined") {
         const cfg = (n) => ({ configs: sel ? sel.map(t => ({ count: n, team: t })) : [{ count: n, team: null }] });
         const gens = [sel ? cfg(3) : null, cfg(5), cfg(4), cfg(3)];
         gens.forEach((structure, gi) => {
-          eng.generateShowdownCorrelated(pool, gi === 0 ? 120 : 50, { ...baseGen, poolAttempts: 2500, seed: 31 + gi + pp * 1000 + SB, structure }).forEach(r => addCand(r.arr));
+          eng.generateShowdownCorrelated(pool, gi === 0 ? 120 : 50, { ...baseGen, poolAttempts: 2500, seed: 31 + gi + pp * 1000, structure }).forEach(r => addCand(r.arr));
         });
       } else {
         const gcommon = { ...baseGen, flexEligible, vegasContext: state.vegasContext, maxMainTeam: genMain, maxOtherTeam: genOther, secondaryStackSize: 0, tertiaryStackSize: 0 };
-        eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31 + pp * 1000 + SB, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
+        eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31 + pp * 1000, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
         const qbs = pool.filter(p => p.position === "QB");
         const topQb = Math.max(...qbs.map(p => p.proj), 0);
         const teams = [...new Set(qbs.filter(p => p.proj >= 0.6 * topQb).map(p => p.team))];
         teams.forEach((t, ti) => {
           for (const size of [2, 3].filter(z => z <= ctx.maxStack)) for (const bb of [0, 1]) {
-            try { eng.generateCorrelatedLineups(pool, 3, { ...gcommon, poolAttempts: 500, seed: 40 + ti + pp * 1000 + SB, bringBackShare: bb, stackTeams: [t], stackSize: size }).forEach(r => addCand(r.arr)); } catch (e) { /* skip */ }
+            try { eng.generateCorrelatedLineups(pool, 3, { ...gcommon, poolAttempts: 500, seed: 40 + ti + pp * 1000, bringBackShare: bb, stackTeams: [t], stackSize: size }).forEach(r => addCand(r.arr)); } catch (e) { /* skip */ }
           }
         });
       }

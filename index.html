@@ -5626,7 +5626,8 @@ if (typeof window !== "undefined") {
       poolAttempts: 1500, ownershipField: "ownLarge", salaryCap, minSalary, ceilingWeight: parseInt(els.sliderCeilingWeight.value, 10) / 100,
       boosts: ruleBoosts(), ownershipWeight: parseInt(els.sliderLargeOwn.value, 10) / 100, maxExposureFraction: 0.7,
     };
-    const rng = eng.mulberry32(777);
+    const SB = Math.floor(Math.random() * 1e6); // fresh random draws every run, so results vary run to run like real slates would
+    const rng = eng.mulberry32(777 + SB);
     const existingRaw = [];
     ["proj", "ceil"].forEach(k => (state.results[k] || []).forEach(arr => existingRaw.push(arr)));
     ["small", "large"].forEach(k => (state.results[k] || []).forEach(r => existingRaw.push(r.arr)));
@@ -5649,17 +5650,17 @@ if (typeof window !== "undefined") {
         const cfg = (n) => ({ configs: sel ? sel.map(t => ({ count: n, team: t })) : [{ count: n, team: null }] });
         const gens = [sel ? cfg(3) : null, cfg(5), cfg(4), cfg(3)];
         gens.forEach((structure, gi) => {
-          eng.generateShowdownCorrelated(pool, gi === 0 ? 120 : 50, { ...baseGen, poolAttempts: 2500, seed: 31 + gi + pp * 1000, structure }).forEach(r => addCand(r.arr));
+          eng.generateShowdownCorrelated(pool, gi === 0 ? 120 : 50, { ...baseGen, poolAttempts: 2500, seed: 31 + gi + pp * 1000 + SB, structure }).forEach(r => addCand(r.arr));
         });
       } else {
         const gcommon = { ...baseGen, flexEligible, vegasContext: state.vegasContext, maxMainTeam: genMain, maxOtherTeam: genOther, secondaryStackSize: 0, tertiaryStackSize: 0 };
-        eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31 + pp * 1000, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
+        eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31 + pp * 1000 + SB, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
         const qbs = pool.filter(p => p.position === "QB");
         const topQb = Math.max(...qbs.map(p => p.proj), 0);
         const teams = [...new Set(qbs.filter(p => p.proj >= 0.6 * topQb).map(p => p.team))];
         teams.forEach((t, ti) => {
           for (const size of [2, 3].filter(z => z <= ctx.maxStack)) for (const bb of [0, 1]) {
-            try { eng.generateCorrelatedLineups(pool, 3, { ...gcommon, poolAttempts: 500, seed: 40 + ti + pp * 1000, bringBackShare: bb, stackTeams: [t], stackSize: size }).forEach(r => addCand(r.arr)); } catch (e) { /* skip */ }
+            try { eng.generateCorrelatedLineups(pool, 3, { ...gcommon, poolAttempts: 500, seed: 40 + ti + pp * 1000 + SB, bringBackShare: bb, stackTeams: [t], stackSize: size }).forEach(r => addCand(r.arr)); } catch (e) { /* skip */ }
           }
         });
       }
@@ -5670,14 +5671,14 @@ if (typeof window !== "undefined") {
       statusEl.textContent = `Scoring ${cands.size.toLocaleString()} candidates in the contest simulation${passes > 1 ? " (" + passes + " passes, each with its own field and random slates)" : ""}…`;
       // each pass gets its own sampled opponent field and its own random slates; results are averaged
       fields = [];
-      for (let pp = 0; pp < passes; pp++) fields.push(getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 1 + pp }));
+      for (let pp = 0; pp < passes; pp++) fields.push(getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 1 + pp + SB }));
       field = fields[0];
       simBase = { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations, vegasContext: state.vegasContext };
       evalMany = async (arrs) => {
         let acc = null;
         for (let pp = 0; pp < passes; pp++) {
           if (pp > 0) { statusEl.textContent = `Pass ${pp + 1} of ${passes}…`; await new Promise(r => setTimeout(r, 15)); }
-          const r = eng.simulateContestROIMulti(arrs, fields[pp], { ...simBase, seed: 101 + pp });
+          const r = eng.simulateContestROIMulti(arrs, fields[pp], { ...simBase, seed: 101 + pp + SB });
           if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes }));
           else r.forEach((x, i) => { acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; });
         }
@@ -5748,8 +5749,8 @@ if (typeof window !== "undefined") {
       const base = existingRaw.map(simArr), mine = picked.map(x => simArr(x.arr));
       // Validate on fresh slates with 3x the runs (less noise), then ORDER the picks by that
       // validated score — the selection-time ranking carries luck from the search itself.
-      const oosField = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 99 });
-      const oos = eng.simulateContestROIMulti([...mine, ...base], oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 });
+      const oosField = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 99 + SB });
+      const oos = eng.simulateContestROIMulti([...mine, ...base], oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 + SB });
       let oosMine = oos.slice(0, mine.length);
       const oosBase = oos.slice(mine.length);
       const order = picked.map((_, i) => i).sort((i, j) => scorer(oosMine[j]) - scorer(oosMine[i]));
@@ -6352,7 +6353,7 @@ if (typeof window !== "undefined") {
     if (!contests.length) return notify("err", "Pick at least one contest to simulate.");
     const st = simSettings();
     const sd = state.contestType === "showdown";
-    const t0 = performance.now();
+    const t0 = performance.now(); const runSeed = Math.floor(Math.random() * 1e9);
     simming = true; $("simBtn").disabled = true; $("simBtn").textContent = "Simulating…"; simProg(2);
     try {
       const scenario = state.buildInfo && state.buildInfo.scenarioInfo && state.generationPool;
@@ -6363,7 +6364,7 @@ if (typeof window !== "undefined") {
       const extra = []; entries.forEach(e => e.arr.forEach(p => { if (!cur.has(p.id)) { cur.set(p.id, p); extra.push(p); } }));
       const simPlayers = basePool.concat(extra);
       msg("Replaying the slate…"); await tick();
-      const sim = eng.simulatePlayerScores(simPlayers, { iterations: st.iters, seed: (Date.now() % 1e9) | 0, vegasContext: st.vegas, teamWeight: st.teamW, gameWeightBase: st.gameW });
+      const sim = eng.simulatePlayerScores(simPlayers, { iterations: st.iters, seed: runSeed, vegasContext: st.vegas, teamWeight: st.teamW, gameWeightBase: st.gameW });
       simProg(12);
       let opt = null;
       if (st.doOpt) {
@@ -6379,7 +6380,7 @@ if (typeof window !== "undefined") {
       for (let ci = 0; ci < contests.length; ci++) {
         const c = contests[ci];
         msg(`Contest ${ci + 1} of ${contests.length}: building the field for ${c.label}…`); await tick();
-        const field = getContestField(c, { fieldSampleSize: resolveFieldSize(st.fieldPct, c.totalEntries), sharpShare: st.sharp / 100, consensusShare: st.cons / 100, isShowdown: sd });
+        const field = getContestField(c, { fieldSampleSize: resolveFieldSize(st.fieldPct, c.totalEntries), sharpShare: st.sharp / 100, consensusShare: st.cons / 100, isShowdown: sd, seed: runSeed % 100000 + 7 });
         if (ci === 0) {
           let fw = 0, fp = 0, fo = 0; const byId = new Map(simPlayers.map(p => [p.id, p]));
           field.archetypes.forEach((a, i) => { const w = field.archetypeWeights[i]; fw += w; fp += w * lineupProj(a); fo += w * ownSum(a); a.forEach(p => fieldOwn.set(p.id, (fieldOwn.get(p.id) || 0) + w)); });
@@ -6388,7 +6389,7 @@ if (typeof window !== "undefined") {
         }
         if (entries.length) {
           msg(`Contest ${ci + 1} of ${contests.length}: running ${entries.length} lineups through ${c.label}…`); await tick();
-          out.push(eng.simulateContestROIMulti(entries.map(e => e.arr), field, { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations: st.iters, seed: 1 + ci, vegasContext: st.vegas, teamWeight: st.teamW, gameWeightBase: st.gameW }));
+          out.push(eng.simulateContestROIMulti(entries.map(e => e.arr), field, { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations: st.iters, seed: runSeed + 1 + ci, vegasContext: st.vegas, teamWeight: st.teamW, gameWeightBase: st.gameW }));
         }
         simProg(40 + 55 * (ci + 1) / contests.length); await tick();
       }

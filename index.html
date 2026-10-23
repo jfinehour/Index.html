@@ -1223,7 +1223,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
       <div class="form">
         <div class="field"><label for="simIters">Iterations</label>
           <select id="simIters" class="sel"><option value="500">500 (fast)</option><option value="1000" selected>1,000</option><option value="2500">2,500</option><option value="5000">5,000 (slow)</option></select></div>
-        <div class="field"><span class="flabel">Contests</span>
+        <div class="field"><span class="flabel">Contest</span>
           <div class="contests" id="contestList"></div>
           <button type="button" class="btn" id="addContestToggle">+ Add or edit a contest</button>
         </div>
@@ -1267,7 +1267,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
     <section class="panel" aria-label="Sim-built lineups">
       <div class="panel-h"><h2>Sim-built lineups</h2></div>
       <div class="form">
-        <span class="hint">Gridlock builds a pool of candidate lineups, runs every one through the first contest you ticked above, improves the best with simulation-checked swaps, and keeps a diversified set. The picks are then re-scored on fresh replays so their numbers aren't inflated by luck.</span>
+        <span class="hint">Gridlock builds a pool of candidate lineups, runs every one through the selected contest above, improves the best with simulation-checked swaps, and keeps a diversified set. The picks are then re-scored on fresh replays so their numbers aren't inflated by luck.</span>
         <div class="two">
           <div class="field"><label for="bestN">Lineups to keep</label><input type="number" id="bestN" min="1" max="150" value="20"></div>
           <div class="field"><label for="sbStack">Max stack size</label><input type="number" id="sbStack" min="2" max="6" value="5"></div>
@@ -5595,7 +5595,7 @@ if (typeof window !== "undefined") {
     if (!state.players) return;
     const c = selectedContests()[0];
     if (!c || !c.totalEntries || !c.payoutTable || c.entryFee == null) {
-      statusEl.textContent = "Tick at least one contest first."; statusEl.className = "status-line err"; return;
+      statusEl.textContent = "Pick a contest first."; statusEl.className = "status-line err"; return;
     }
     const isShowdown = state.contestType === "showdown";
     const sbs = sbSettings();
@@ -6259,7 +6259,7 @@ if (typeof window !== "undefined") {
   const contestPaid = (c) => (c.payoutTable || []).reduce((m, r) => Math.max(m, r.end), 0);
 
   function selectedContestIds() {
-    if (!state.simContestIds) state.simContestIds = new Set(state.contestPresets.filter(p => p.payoutTable && p.totalEntries).map(p => p.id));
+    if (!state.simContestIds || state.simContestIds.size !== 1) { const ok = state.contestPresets.filter(p => p.payoutTable && p.totalEntries); const keep = ok.find(p => state.simContestIds && state.simContestIds.has(p.id)) || ok.find(p => p.id === state.activeContestPresetId) || ok[0]; state.simContestIds = new Set(keep ? [keep.id] : []); }
     return state.simContestIds;
   }
   function selectedContests() {
@@ -6268,14 +6268,11 @@ if (typeof window !== "undefined") {
   }
   function renderContestList() {
     const ids = selectedContestIds();
-    $("contestList").innerHTML = state.contestPresets.map(c => {
-      const first = c.payoutTable && c.payoutTable[0] ? c.payoutTable[0].payout : 0;
-      return `<label class="ct"><input type="checkbox" data-ct="${escapeHtml(c.id)}" ${ids.has(c.id) ? "checked" : ""}><span><b>${escapeHtml(c.label)}</b><small>${(c.totalEntries || 0).toLocaleString()} entries · ${fmtMoney(c.entryFee || 0)} entry · ${fmtMoney(contestPool(c))} prizes · top ${contestPaid(c).toLocaleString()} paid · 1st ${fmtMoney(first)}</small></span><button type="button" class="edit" data-ct-edit="${escapeHtml(c.id)}">edit</button></label>`;
-    }).join("");
-    const act = state.contestPresets.find(c => c.id === state.activeContestPresetId);
+    const cur = state.contestPresets.find(c => ids.has(c.id)) || state.contestPresets[0];
+    $("contestList").innerHTML = `<select id="contestSel" class="sel" aria-label="Contest">${state.contestPresets.map(c => `<option value="${escapeHtml(c.id)}"${cur && c.id === cur.id ? " selected" : ""}>${escapeHtml(c.label)}</option>`).join("")}</select>` +
+      (cur ? `<div class="ct" style="margin-top:8px"><span><small>${(cur.totalEntries || 0).toLocaleString()} entries · ${fmtMoney(cur.entryFee || 0)} entry · ${fmtMoney(contestPool(cur))} prizes · top ${contestPaid(cur).toLocaleString()} paid · 1st ${fmtMoney(cur.payoutTable && cur.payoutTable[0] ? cur.payoutTable[0].payout : 0)}</small></span><button type="button" class="edit" data-ct-edit="${escapeHtml(cur.id)}">edit</button></div>` : "");
     const fr = $("fieldRes"), hint = $("fieldResHint");
-    const c0 = selectedContests()[0] || act;
-    if (c0 && hint) hint.textContent = `${fieldSizeLabel(parseInt(fr.value, 10), c0.totalEntries)} for ${c0.label}. Higher is more realistic and slower.`;
+    if (cur && hint) hint.textContent = `${fieldSizeLabel(parseInt(fr.value, 10), cur.totalEntries)} for ${cur.label}. Higher is more realistic and slower.`;
   }
   function openContestForm(id) {
     state.ctEditId = id || null;
@@ -6286,9 +6283,8 @@ if (typeof window !== "undefined") {
   }
   function wireSimRail() {
     $("contestList").addEventListener("change", (e) => {
-      const t = e.target.closest("[data-ct]"); if (!t) return;
-      const ids = selectedContestIds(); if (t.checked) ids.add(t.dataset.ct); else ids.delete(t.dataset.ct);
-      renderContestList();
+      const t = e.target.closest("#contestSel"); if (!t) return;
+      state.simContestIds = new Set([t.value]); state.activeContestPresetId = t.value; renderContestList();
     });
     $("contestList").addEventListener("click", (e) => { const b = e.target.closest("[data-ct-edit]"); if (!b) return; e.preventDefault(); openContestForm(b.dataset.ctEdit); });
     $("addContestToggle").addEventListener("click", () => { if ($("customBox").hidden) openContestForm(null); else $("customBox").hidden = true; });
@@ -6300,12 +6296,12 @@ if (typeof window !== "undefined") {
       const id = state.ctEditId || "preset_" + Date.now();
       const preset = { id, label: $("ctName").value.trim() || `$${fee} · ${entries.toLocaleString()} entries`, totalEntries: entries, entryFee: fee, payoutTable: table, rawText: "", payoutRawText: payText };
       if (state.ctEditId) state.contestPresets = state.contestPresets.map(p => p.id === id ? preset : p); else state.contestPresets.push(preset);
-      selectedContestIds().add(id); state.activeContestPresetId = id; persistContestPresets();
+      state.simContestIds = new Set([id]); state.activeContestPresetId = id; persistContestPresets();
       $("customBox").hidden = true; renderContestList();
     });
     $("ctDelete").addEventListener("click", () => {
       if (!state.ctEditId || state.contestPresets.length < 2) return;
-      state.contestPresets = state.contestPresets.filter(p => p.id !== state.ctEditId); selectedContestIds().delete(state.ctEditId);
+      state.contestPresets = state.contestPresets.filter(p => p.id !== state.ctEditId); state.simContestIds = null;
       state.activeContestPresetId = state.contestPresets[0].id; persistContestPresets(); $("customBox").hidden = true; renderContestList();
     });
     [["sharp", "sharpOut"], ["consensus", "consensusOut"], ["gameCorr", "gameOut"], ["teamCorr", "teamOut"], ["fieldRes", "fieldResOut"]].forEach(([i, o]) => {
@@ -6569,7 +6565,7 @@ if (typeof window !== "undefined") {
     $("simMeta").textContent = B ? `${B.count} lineups · ${B.evaluated.toLocaleString()} candidates scored` : "Not built yet";
     note.innerHTML = "";
     if (!B || !state.results.sim) {
-      body.innerHTML = `<div class="empty">Use <b>Build best simmed lineups</b> in the settings to have Gridlock search for the lineups with the best results in the first contest you've ticked.</div>`;
+      body.innerHTML = `<div class="empty">Use <b>Build best simmed lineups</b> in the settings to have Gridlock search for the lineups with the best results in the selected contest.</div>`;
       return;
     }
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);

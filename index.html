@@ -5525,6 +5525,8 @@ if (typeof window !== "undefined") {
     if (state.results.ceil) state.results.ceil.forEach((arr, i) => entries.push({ bucket: "Ceiling", rank: i + 1, arr: toSimPool(arr) }));
     if (state.results.small) state.results.small.forEach((r, i) => entries.push({ bucket: "Small Field", rank: i + 1, arr: r.arr }));
     if (state.results.large) state.results.large.forEach((r, i) => entries.push({ bucket: "Large Field", rank: i + 1, arr: r.arr }));
+    if (state.results.sim) state.results.sim.forEach((arr, i) => entries.push({ bucket: "Sim-Built", rank: i + 1, arr: toSimPool(arr) }));
+    if (state.results.simopt) state.results.simopt.forEach((arr, i) => entries.push({ bucket: "Sim Optimal", rank: i + 1, arr: toSimPool(arr) }));
     return entries;
   }
 
@@ -6306,14 +6308,25 @@ if (typeof window !== "undefined") {
     const uniq = new Set(arrs.flat().map(p => p.name)).size;
     $("stats").innerHTML = [["Lineups", L.length], ["Top proj", fmtNum(Math.max(...L.map(x => x.proj)))], ["Avg proj", fmtNum(avg(x => x.proj))], ["Avg ceiling", fmtNum(avg(x => x.ceil))], ["Avg salary", fmtMoney(avg(x => x.sal))], ["Avg own", Math.round(avg(x => x.own)) + "%"], ...(gpp ? [["Avg leverage", fmtNum(avg(x => x.lev))]] : []), ["Players used", uniq]]
       .map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
+    const SR = state.sim && state.sim.site === siteKey() ? state.sim : null;
+    const sigF = (arr) => sd ? eng.showdownSignature(arr) : eng.signature(arr);
+    const simMap = new Map();
+    if (SR) SR.mine.forEach(m => { const k = sigF(m.arr); if (!simMap.has(k)) simMap.set(k, m); });
+    const simOf = (arr) => { const m = SR && simMap.get(sigF(arr)); return m && m.c[0] ? m.c[0] : null; };
+    const simHead = SR ? `<th class="n cg" title="${escapeHtml(SR.contests[0].name)}">Sim cash</th><th class="n">Sim top 1%</th><th class="n">Sim win</th><th class="n">Sim ROI</th>` : "";
+    const simCells = (arr) => { if (!SR) return ""; const x = simOf(arr); return x ? `<td class="n cg">${pctFmt(x.cashRatePct)}</td><td class="n">${pctFmt(x.top1Pct)}</td><td class="n">${pctFmt(x.winPct)}</td><td class="n">${roiCell(x.roiPct)}</td>` : '<td class="n cg">–</td><td class="n">–</td><td class="n">–</td><td class="n">–</td>'; };
+    if (SR && state.resTab === "lineups") {
+      const have = arrs.map(simOf).filter(Boolean);
+      if (have.length) { const av = (k) => have.reduce((a, x) => a + x[k], 0) / have.length; $("stats").innerHTML += [["Sim avg cash", pctFmt(av("cashRatePct"))], ["Sim avg top 1%", pctFmt(av("top1Pct"))], ["Sim avg win", pctFmt(av("winPct"))], ["Sim avg ROI", sgnPct(av("roiPct"))]].map(([t, v]) => `<div class="stat"><span>${t} · ${escapeHtml(SR.contests[0].short)}</span><b>${v}</b></div>`).join(""); }
+    }
     if (state.resTab === "lineups") {
-      $("resBody").innerHTML = `<table class="lu"><thead><tr><th>#</th>${slotNames().map(s => `<th>${s}</th>`).join("")}<th class="n">Salary</th><th class="n">Proj</th><th class="n">Ceil</th><th class="n">Own%</th>${gpp ? '<th class="n">Leverage</th>' : ""}</tr></thead><tbody>` +
+      $("resBody").innerHTML = `<table class="lu"><thead><tr><th>#</th>${slotNames().map(s => `<th>${s}</th>`).join("")}<th class="n">Salary</th><th class="n">Proj</th><th class="n">Ceil</th><th class="n">Own%</th>${gpp ? '<th class="n">Leverage</th>' : ""}${simHead}</tr></thead><tbody>` +
         L.map(x => {
           const qb = !sd ? x.arr.find(p => p.position === "QB") : null;
           return `<tr><td class="rank"><a href="#" class="lineup-link" data-lineup-ref="${TYPE_LABEL[type]}|${x.i + 1}">${String(x.i + 1).padStart(3, "0")}</a></td>${orderedSlots(x.arr).map(({ p }) => {
             const c = sd && p.isCaptain, stk = qb && p.position !== "DST" && p.team === qb.team;
             return `<td class="slot"><span class="pl${c ? " cpt" : ""}${stk ? " stk" : ""}"><b>${escapeHtml(p.name)}</b><small>${escapeHtml(p.team)} · ${fmtMoney(c ? p.salary * 1.5 : p.salary)} · ${fmtNum(p.proj * (c ? 1.5 : 1))}</small></span></td>`;
-          }).join("")}<td class="n"><span class="cap" title="${fmtMoney(cap - x.sal)} left"><span>${fmtMoney(x.sal)}</span><i style="--w:${(x.sal / cap * 100).toFixed(1)}%"></i></span></td><td class="n"><b>${fmtNum(x.proj)}</b></td><td class="n">${fmtNum(x.ceil)}</td><td class="n">${fmtNum(x.own)}</td>${gpp ? `<td class="n">${fmtNum(x.lev)}</td>` : ""}</tr>`;
+          }).join("")}<td class="n"><span class="cap" title="${fmtMoney(cap - x.sal)} left"><span>${fmtMoney(x.sal)}</span><i style="--w:${(x.sal / cap * 100).toFixed(1)}%"></i></span></td><td class="n"><b>${fmtNum(x.proj)}</b></td><td class="n">${fmtNum(x.ceil)}</td><td class="n">${fmtNum(x.own)}</td>${gpp ? `<td class="n">${fmtNum(x.lev)}</td>` : ""}${simCells(x.arr)}</tr>`;
         }).join("") + "</tbody></table>";
     } else {
       const c = new Map();
@@ -6631,6 +6644,13 @@ if (typeof window !== "undefined") {
     if (state.simTab === "built") { renderSimBuiltPane(); return; }
     if (!R || R.site !== siteKey()) {
       $("simMeta").textContent = "Not run yet"; note.innerHTML = "";
+      const pre = state.simTab === "mine" ? collectAllLineupsForSim() : [];
+      if (pre.length) {
+        const sdp = state.contestType === "showdown";
+        note.innerHTML = `<div class="simnote"><b>${pre.length} lineup${pre.length === 1 ? "" : "s"} ready.</b> Press <b>Run simulation</b> to score them against the selected contest.</div>`;
+        body.innerHTML = `<table class="simt"><thead><tr><th>#</th><th>Lineup</th><th class="n">Proj</th><th class="n">Own sum</th></tr></thead><tbody>` + pre.map((e, i) => `<tr><td class="rank">${String(i + 1).padStart(3, "0")}</td><td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="${escapeHtml(e.bucket)}|${e.rank}">${escapeHtml(e.bucket)} #${e.rank}</a>${namesOf(orderForNames(e.arr, sdp))}</td><td class="n">${fmtNum(lineupProj(e.arr))}</td><td class="n">${fmtNum(ownSum(e.arr))}</td></tr>`).join("") + "</tbody></table>";
+        return;
+      }
       body.innerHTML = '<div class="empty">Run the simulation to replay this slate thousands of times. You\'ll see how each of your lineups scores, how often it cashes or finishes top 1% against a realistic field, and which players show up most in the optimal lineup.</div>';
       return;
     }

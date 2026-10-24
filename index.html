@@ -1273,7 +1273,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
           <div class="field"><label for="sbStack">Max stack size</label><input type="number" id="sbStack" min="2" max="6" value="5"></div>
         </div>
         <div class="field"><label for="sbPasses">Stability</label><select id="sbPasses" class="sel"><option value="1" selected>1 pass (fastest)</option><option value="3">3 passes (about 3x slower)</option><option value="5">5 passes (about 5x slower)</option></select><span class="hint">Each extra pass scores candidates against another sampled field and another set of random slates, then averages. Slower; in testing it did not clearly make picks steadier.</span></div>
-        <div class="field"><label for="rankBy">Pick by</label><select id="rankBy" class="sel"><option value="blend">Blend of cash rate and ROI</option><option value="roi">ROI</option><option value="cash">Cash rate</option></select></div>
+        <div class="field"><label for="rankBy">Pick by</label><select id="rankBy" class="sel"><option value="roi" selected>ROI</option><option value="top1">Top 1% rate</option><option value="win">Win rate</option><option value="cash">Cash rate</option></select></div>
         <div class="field"><span class="flabel" id="sbTeamLbl">Teams to stack</span><div class="team-chip-grid" id="sbTeams"></div></div>
         <span class="hint">Follows your Optimizer locks, excludes, max per team, min salary and TE-in-FLEX settings.</span>
       </div>
@@ -5810,8 +5810,8 @@ if (typeof window !== "undefined") {
         for (let pp = 0; pp < passes; pp++) {
           if (pp > 0) { statusEl.textContent = `Pass ${pp + 1} of ${passes}…`; await new Promise(r => setTimeout(r, 15)); }
           const r = eng.simulateContestROIMulti(arrs, fields[pp], { ...simBase, seed: 101 + pp + SB });
-          if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes }));
-          else r.forEach((x, i) => { acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; });
+          if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes, top1Pct: x.top1Pct / passes, winPct: x.winPct / passes }));
+          else r.forEach((x, i) => { acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; acc[i].top1Pct += x.top1Pct / passes; acc[i].winPct += x.winPct / passes; });
         }
         return acc;
       };
@@ -5823,10 +5823,11 @@ if (typeof window !== "undefined") {
       const lo = rois[Math.floor(rois.length * 0.05)], hi = rois[Math.floor(rois.length * 0.95)];
       const clampR = (v) => Math.min(hi, Math.max(lo, v));
       const stat = (xs) => { const m = xs.reduce((s, v) => s + v, 0) / xs.length; const sd = Math.sqrt(xs.reduce((s, v) => s + (v - m) ** 2, 0) / xs.length) || 1; return { m, sd }; };
-      const sc = stat(cashs), sr = stat(res.map(r => clampR(r.roiPct)));
+      const sc = stat(cashs), sr = stat(res.map(r => clampR(r.roiPct))), st1 = stat(res.map(r => r.top1Pct)), sw = stat(res.map(r => r.winPct));
       scorer = (r) => {
-        const zc = (r.cashRatePct - sc.m) / sc.sd, zr = (clampR(r.roiPct) - sr.m) / sr.sd;
-        return metric === "cash" ? zc : metric === "roi" ? zr : 0.5 * (zc + zr);
+        const zc = (r.cashRatePct - sc.m) / sc.sd, zr = (clampR(r.roiPct) - sr.m) / sr.sd, z1 = (r.top1Pct - st1.m) / st1.sd, zw = (r.winPct - sw.m) / sw.sd;
+        // win rate is zero for most candidates, so break ties with top 1% rate
+        return metric === "cash" ? zc : metric === "top1" ? z1 : metric === "win" ? zw + 0.02 * z1 : zr;
       };
       list.forEach(x => { x.score = scorer(x.res); });
     });
@@ -5953,7 +5954,7 @@ if (typeof window !== "undefined") {
   function sbSettings() {
     const num = (id, d) => { const e = document.getElementById(id); const v = e ? parseInt(e.value, 10) : NaN; return Number.isFinite(v) ? v : d; };
     const rb = document.getElementById("rankBy");
-    return { metric: rb ? rb.value : "blend", count: Math.max(1, Math.min(150, num("bestN", 20))), sharp: num("sharp", 35), cons: num("consensus", 15), fieldPct: num("fieldRes", 35), runs: Math.min(5000, num("simIters", 1000)), maxStack: Math.max(2, Math.min(6, num("sbStack", 5))), passes: Math.max(1, Math.min(5, num("sbPasses", 1))), teams: (state.sbTeams || []).slice() };
+    return { metric: rb ? rb.value : "roi", count: Math.max(1, Math.min(150, num("bestN", 20))), sharp: num("sharp", 35), cons: num("consensus", 15), fieldPct: num("fieldRes", 35), runs: Math.min(5000, num("simIters", 1000)), maxStack: Math.max(2, Math.min(6, num("sbStack", 5))), passes: Math.max(1, Math.min(5, num("sbPasses", 1))), teams: (state.sbTeams || []).slice() };
   }
 
   function sbTeamList() {
@@ -6721,7 +6722,7 @@ if (typeof window !== "undefined") {
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);
     stats.hidden = false;
     stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg top 1%", pctFmt(B.oosTop1)], ["Avg win", pctFmt(B.oosWin)], ["Avg ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
-    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${B.metric === "cash" ? "cash rate" : B.metric === "roi" ? "ROI" : "a blend of cash rate and ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.</div>
+    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.</div>
       <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
     if (B.res && B.fieldAvg) {
       const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));

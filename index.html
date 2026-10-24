@@ -4991,10 +4991,7 @@ if (typeof window !== "undefined") {
   /* ---------------- Player boosts (GPP selection only, not real stats) ---------------- */
   function renderPlayerBoosts() {
     const hasPlayers = state.players && state.players.length > 0;
-    els.playerBoostGroup.style.display = hasPlayers ? "block" : "none";
-    if (!hasPlayers) return;
-    renderBoostSearchResults();
-    renderBoostCurrentList();
+    els.playerBoostGroup.style.display = "none"; // boosts now live in the pool table (Boost % column)
   }
 
   function renderBoostSearchResults() {
@@ -5141,7 +5138,9 @@ if (typeof window !== "undefined") {
     const M = (rulesActive() || maxOwnCap() || !isGppType(type)) ? 3 : 1; // extra candidates so the rules have something to choose from
     const keepName = (p) => isLocked(p.name) || ((ruleOf(p.name) || {}).min > 0);
     const lockSet = new Set(lockedNames());
+    const bstOf = (p) => 1 + (state.playerBoosts.get(p.name) || 0);
     const lockMetric = (f) => (p) => f(p) + (lockSet.has(p.name) ? 1000 : 0);
+    const boostMetric = (f) => (p) => f(p) * bstOf(p);
     const genBoosts = ruleBoosts();
     const ceilingWeight = parseInt(els.sliderCeilingWeight.value, 10) / 100;
     const minProj = parseFloat(els.sliderMinProj.value);
@@ -5159,7 +5158,7 @@ if (typeof window !== "undefined") {
         ? { configs: [...script.configs].map(key => { const [c, t] = key.split(":"); return { count: parseInt(c, 10), team: t === "any" ? null : t }; }) }
         : null;
       if (type === "proj" || type === "ceil") {
-        const f = lockMetric(type === "proj" ? (p => p.proj) : (p => p.ceiling));
+        const f = lockMetric(boostMetric(type === "proj" ? (p => p.proj) : (p => p.ceiling)));
         state.results[type] = selectWithRules(genOver(players, (bp, k) => eng.generateShowdownTopN(bp, f, n * M, { attempts: 500, seed: seedBase + k, salaryCap }), x => x, x => eng.showdownScore(x, f), eng.showdownSignature), n, expFrac, x => x);
         return true;
       }
@@ -5182,7 +5181,7 @@ if (typeof window !== "undefined") {
 
     const flexEligible = els.toggleTEFlex.checked ? new Set(["RB", "WR", "TE"]) : new Set(["RB", "WR"]);
     if (type === "proj" || type === "ceil") {
-      const f = lockMetric(type === "proj" ? (p => p.proj) : (p => p.ceiling));
+      const f = lockMetric(boostMetric(type === "proj" ? (p => p.proj) : (p => p.ceiling)));
       state.results[type] = selectWithRules(genOver(players, (bp, k) => eng.generateTopN(bp, f, n * M, { attempts: 500, seed: seedBase + k, flexEligible, salaryCap }), x => x, x => eng.lineupScore(x, f), eng.signature), n, expFrac, x => x);
       return true;
     }
@@ -5258,8 +5257,8 @@ if (typeof window !== "undefined") {
       parts.push(`<b>Min salary used:</b> $${meta.minSalary.toLocaleString()}${pct != null ? ` (${pct}% of cap)` : ""}`);
     }
     if (meta.boosts && meta.boosts.size > 0) {
-      const list = [...meta.boosts.entries()].map(([name, f]) => `${escapeHtml(name)} +${Math.round(f * 100)}%`).join(", ");
-      parts.push(`<b>Player boosts:</b> ${list} (GPP selection only — real Proj/Ceiling unchanged)`);
+      const list = [...meta.boosts.entries()].map(([name, f]) => `${escapeHtml(name)} ${f > 0 ? "+" : ""}${Math.round(f * 100)}%`).join(", ");
+      parts.push(`<b>Player boosts:</b> ${list} (selection only — real Proj/Ceiling unchanged)`);
     }
     if (meta.maxMainTeam > 0) parts.push(`<b>Max main stack team:</b> ${meta.maxMainTeam} player${meta.maxMainTeam === 1 ? "" : "s"}`);
     if (meta.maxOtherTeam > 0) parts.push(`<b>Max any other team:</b> ${meta.maxOtherTeam} player${meta.maxOtherTeam === 1 ? "" : "s"}`);
@@ -6172,7 +6171,7 @@ if (typeof window !== "undefined") {
     const get = (p) => f.sortKey === "val" ? val(p) : f.sortKey === "exp" ? expOf(p) : p[f.sortKey];
     rows.sort((x, y) => { const a = get(x), b = get(y); return (typeof a === "string" ? a.localeCompare(b) : (a || 0) - (b || 0)) * f.sortDir; });
     const th = (k, label, num) => `<th class="sortable-th${f.sortKey === k ? " active" : ""}${num ? " num" : ""}" data-pl-sort="${k}">${label}${f.sortKey === k ? (f.sortDir > 0 ? " ▲" : " ▼") : ""}</th>`;
-    head.innerHTML = `<tr><th title="Lock into every lineup / Exclude"></th>${th("name", "Player")}<th>Pos</th>${th("team", "Team")}${th("salary", isSd ? "Salary (FLEX)" : "Salary", 1)}${th("proj", "Proj", 1)}${th("ceiling", "Ceil", 1)}${th("val", "Value", 1)}${th("own", hasLarge ? "Own (Small)" : "Own %", 1)}${hasLarge ? th("ownLarge", "Own (Large)", 1) : ""}<th class="num">Min %</th><th class="num">Max %</th>${th("exp", ex.n ? `Exp (${ex.n})` : "Exp", 1)}<th></th></tr>`;
+    head.innerHTML = `<tr><th title="Lock into every lineup / Exclude"></th>${th("name", "Player")}<th>Pos</th>${th("team", "Team")}${th("salary", isSd ? "Salary (FLEX)" : "Salary", 1)}${th("proj", "Proj", 1)}${th("ceiling", "Ceil", 1)}${th("val", "Value", 1)}${th("own", hasLarge ? "Own (Small)" : "Own %", 1)}${hasLarge ? th("ownLarge", "Own (Large)", 1) : ""}<th class="num" title="Selection boost: nudges this player up (+) or down (−) when building lineups. Does not change projections.">Boost %</th><th class="num">Min %</th><th class="num">Max %</th>${th("exp", ex.n ? `Exp (${ex.n})` : "Exp", 1)}<th></th></tr>`;
     const inp = (name, field, v, step) => {
       const e = state.edits.get(name), edited = e && e[field] !== undefined && Math.abs(e[field] - plBaseByName(name)[field]) > 1e-9;
       return `<input class="pl-in${edited ? " edited" : ""}" type="number" step="${step}" min="0" data-pl-edit="${field}" data-pl-name="${escapeHtml(name)}" value="${Number.isFinite(v) ? +(+v).toFixed(2) : ""}" aria-label="${field} for ${escapeHtml(name)}">`;
@@ -6187,10 +6186,10 @@ if (typeof window !== "undefined") {
       <td class="num">${inp(p.name, "proj", p.proj, 0.1)}</td><td class="num">${inp(p.name, "ceiling", p.ceiling, 0.1)}</td>
       <td class="num">${val(p).toFixed(2)}</td>
       <td class="num">${inp(p.name, "own", p.own, 0.5)}</td>${hasLarge ? `<td class="num">${inp(p.name, "ownLarge", p.ownLarge, 0.5)}</td>` : ""}
-      <td class="num">${rin(p.name, "min")}</td><td class="num">${rin(p.name, "max")}</td>
+      <td class="num"><input class="pl-in sm${state.playerBoosts.get(p.name) ? " edited" : ""}" type="number" min="-50" max="50" step="1" placeholder="–" data-pl-boost data-pl-name="${escapeHtml(p.name)}" value="${state.playerBoosts.get(p.name) ? Math.round(state.playerBoosts.get(p.name) * 100) : ""}" aria-label="Boost % for ${escapeHtml(p.name)}"></td><td class="num">${rin(p.name, "min")}</td><td class="num">${rin(p.name, "max")}</td>
       <td class="num">${ex.n ? `<span class="pl-exp"><i style="width:${Math.max(ex.c.get(p.name) ? 2 : 0, expOf(p) * 0.4)}px"></i>${Math.round(expOf(p))}%</span>` : "–"}</td>
       <td>${state.edits.has(p.name) ? `<button type="button" class="pl-undo" data-pl-undo="${escapeHtml(p.name)}" title="Undo edits">↺</button>` : ""}</td></tr>`).join("")
-      : `<tr><td colspan="13" class="empty">No players match these filters.</td></tr>`;
+      : `<tr><td colspan="14" class="empty">No players match these filters.</td></tr>`;
   }
 
   function wireOptimizerView() {
@@ -6198,6 +6197,11 @@ if (typeof window !== "undefined") {
     body.addEventListener("change", (e) => {
       const t = e.target;
       if (t.dataset.plEdit) return plCommit(t.dataset.plName, t.dataset.plEdit, t.value);
+      if (t.dataset.plBoost !== undefined) {
+        const v = parseFloat(t.value);
+        if (!isFinite(v) || v === 0) state.playerBoosts.delete(t.dataset.plName); else state.playerBoosts.set(t.dataset.plName, Math.max(-50, Math.min(50, v)) / 100);
+        return plApplyAndRefresh();
+      }
       if (t.dataset.plRule) {
         const name = t.dataset.plName, field = t.dataset.plRule;
         const r = Object.assign({}, ruleOf(name) || {});
@@ -6240,7 +6244,7 @@ if (typeof window !== "undefined") {
       populateTeamChips(state.players); render();
     });
     $("clearLocks").addEventListener("click", () => { state.rules.clear(); plApplyAndRefresh(); });
-    $("resetProj").addEventListener("click", () => { state.edits.clear(); plApplyAndRefresh(); });
+    $("resetProj").addEventListener("click", () => { state.edits.clear(); state.playerBoosts.clear(); plApplyAndRefresh(); });
     $("resTypeSeg").addEventListener("click", (e) => { const b = e.target.closest("[data-rtype]"); if (!b) return; state.resType = b.dataset.rtype; state.resTab = "lineups"; render(); });
     $("resTabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (!b) return; state.resTab = b.dataset.tab; renderResults(); });
     $("goSim").addEventListener("click", () => { state.view = "sim"; state.simTab = "mine"; render(); window.scrollTo({ top: 0 }); runSimulation(); });

@@ -1273,7 +1273,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
           <div class="field"><label for="sbStack">Max stack size</label><input type="number" id="sbStack" min="2" max="6" value="5"></div>
         </div>
         <div class="field"><label for="sbPasses">Stability</label><select id="sbPasses" class="sel"><option value="1" selected>1 pass (fastest)</option><option value="3">3 passes (about 3x slower)</option><option value="5">5 passes (about 5x slower)</option></select><span class="hint">Each extra pass scores candidates against another sampled field and another set of random slates, then averages. Slower; in testing it did not clearly make picks steadier.</span></div>
-        <div class="field"><label for="rankBy">Pick by</label><select id="rankBy" class="sel"><option value="blend">Blend of cash rate and robust ROI</option><option value="roi">Robust ROI</option><option value="cash">Cash rate</option></select></div>
+        <div class="field"><label for="rankBy">Pick by</label><select id="rankBy" class="sel"><option value="blend">Blend of cash rate and ROI</option><option value="roi">ROI</option><option value="cash">Cash rate</option></select></div>
         <div class="field"><span class="flabel" id="sbTeamLbl">Teams to stack</span><div class="team-chip-grid" id="sbTeams"></div></div>
         <span class="hint">Follows your Optimizer locks, excludes, max per team, min salary and TE-in-FLEX settings.</span>
       </div>
@@ -3707,6 +3707,16 @@ function simulateContestROIMulti(userLineups, field, opts) {
     const cum = new Float64Array(nA);
     let run = 0;
     for (let k = 0; k < nA; k++) { run += archetypeWeights[order[k]]; cum[k] = run; }
+    // Upper tail: a few thousand sampled opponents cannot show how high the best of thousands of real
+    // entrants will score, so above the top ~1% of the sample the share of the field beating a score is
+    // extrapolated with an exponential tail fitted to that top slice (same approach as Swish).
+    let tailK = 0, tailX = 0, tailQ = 0, tailBeta = 1;
+    if (opts.tail !== false) {
+      let K = 0; while (K < nA - 1 && (cum[K] < 0.01 * totalW || K < 30)) K++;
+      tailX = fs[order[K]]; tailQ = cum[K];
+      let bw = 0, bs = 0; for (let j = 0; j <= K; j++) { const wj = archetypeWeights[order[j]]; bw += wj; bs += wj * (fs[order[j]] - tailX); }
+      tailBeta = Math.max(0.5, bs / bw); tailK = 1;
+    }
     for (let li = 0; li < L; li++) {
       const dupI = dupOf[li];
       const us = dupI >= 0 ? fs[dupI] : sumIdx(userIdx[li]);
@@ -3714,6 +3724,7 @@ function simulateContestROIMulti(userLineups, field, opts) {
       let lo = 0, hi = nA;
       while (lo < hi) { const mid = (lo + hi) >> 1; if (fs[order[mid]] >= us) lo = mid + 1; else hi = mid; }
       let weightAbove = lo > 0 ? cum[lo - 1] : 0;
+      if (tailK && dupI < 0 && us > tailX) weightAbove = tailQ * Math.exp(-(us - tailX) / tailBeta);
       if (dupI >= 0) {
         // remove the identical roster (and any exact-score ties with it) from "above"; it ties with the user instead
         weightAbove -= archetypeWeights[dupI];
@@ -5812,7 +5823,7 @@ if (typeof window !== "undefined") {
       const stat = (xs) => { const m = xs.reduce((s, v) => s + v, 0) / xs.length; const sd = Math.sqrt(xs.reduce((s, v) => s + (v - m) ** 2, 0) / xs.length) || 1; return { m, sd }; };
       const sc = stat(cashs), sr = stat(res.map(r => clampR(r.roiPct)));
       scorer = (r) => {
-        const zc = (r.cashRatePct - sc.m) / sc.sd, zr = (clampR(r.roiCappedPct) - sr.m) / sr.sd;
+        const zc = (r.cashRatePct - sc.m) / sc.sd, zr = (clampR(r.roiPct) - sr.m) / sr.sd;
         return metric === "cash" ? zc : metric === "roi" ? zr : 0.5 * (zc + zr);
       };
       list.forEach(x => { x.score = scorer(x.res); });
@@ -5878,12 +5889,12 @@ if (typeof window !== "undefined") {
       // existing buckets split for the comparison table
       const sizes = [["Projection", (state.results.proj || []).length], ["Ceiling", (state.results.ceil || []).length], ["Small Field", (state.results.small || []).length], ["Large Field", (state.results.large || []).length]];
       let off = 0; const cmp = [];
-      for (const [name, len] of sizes) { if (len) cmp.push({ name, cash: avg(oosBase.slice(off, off + len), "cashRatePct"), roi: avg(oosBase.slice(off, off + len), "roiPct"), cap: avg(oosBase.slice(off, off + len), "roiCappedPct") }); off += len; }
+      for (const [name, len] of sizes) { if (len) cmp.push({ name, cash: avg(oosBase.slice(off, off + len), "cashRatePct"), roi: avg(oosBase.slice(off, off + len), "roiPct"), top1: avg(oosBase.slice(off, off + len), "top1Pct"), win: avg(oosBase.slice(off, off + len), "winPct"), cap: avg(oosBase.slice(off, off + len), "roiCappedPct") }); off += len; }
       state.results.sim = picked.map(x => x.arr);
       state.simBuilt = {
         metric, evaluated: cands.size, count: picked.length, contest: c.label,
-        rows: picked.map((x, i) => ({ inCash: x.res.cashRatePct, inRoi: x.res.roiPct, oosCash: oosMine[i].cashRatePct, oosRoi: oosMine[i].roiPct, oosCap: oosMine[i].roiCappedPct, median: oosMine[i].medianRank, best: oosMine[i].bestRank, idx: i })),
-        oosCash: avg(oosMine, "cashRatePct"), oosRoi: avg(oosMine, "roiPct"), oosCap: avg(oosMine, "roiCappedPct"),
+        rows: picked.map((x, i) => ({ inCash: x.res.cashRatePct, inRoi: x.res.roiPct, oosCash: oosMine[i].cashRatePct, oosRoi: oosMine[i].roiPct, oosCap: oosMine[i].roiCappedPct, oosTop1: oosMine[i].top1Pct, oosWin: oosMine[i].winPct, median: oosMine[i].medianRank, best: oosMine[i].bestRank, idx: i })),
+        oosCash: avg(oosMine, "cashRatePct"), oosRoi: avg(oosMine, "roiPct"), oosCap: avg(oosMine, "roiCappedPct"), oosTop1: avg(oosMine, "top1Pct"), oosWin: avg(oosMine, "winPct"),
         inCash: avg(picked.map(x => x.res), "cashRatePct"), inRoi: avg(picked.map(x => x.res), "roiPct"), cmp,
         res: oosMine, contestId: c.id, fieldAvg: fieldAverages(field), oosIters: Math.min(4000, iterations * 3),
       };
@@ -6551,7 +6562,7 @@ if (typeof window !== "undefined") {
     return sxx && syy ? sxy / Math.sqrt(sxx * syy) : null;
   }
   const strength = (r) => r == null ? "n/a" : Math.abs(r) >= 0.6 ? "strongly" : Math.abs(r) >= 0.3 ? "moderately" : "barely";
-  const avgRoiOf = (r) => r.c.reduce((a, x) => a + x.roiCappedPct, 0) / r.c.length;
+  const avgRoiOf = (r) => r.c.reduce((a, x) => a + x.roiPct, 0) / r.c.length;
 
   function driversHTML(R, rows) {
     const F = R.fieldAvg; if (!F || rows.length < 2) return "";
@@ -6575,7 +6586,7 @@ if (typeof window !== "undefined") {
         <p>Your average lineup's total ownership against the average opponent's. Lower ownership means fewer people share your outcomes, so top finishes split less often.</p></div>
       <div class="drv"><span class="k">Across your ${rows.length} lineups</span><span class="v" style="font-size:17px">ROI tracks projection ${strength(rP)}</span>
         <p>Higher-projected lineups ${rP == null ? "—" : rP >= 0 ? "earn more" : "earn less"} (r = ${rP == null ? "n/a" : rP.toFixed(2)}). Higher ownership ${rO == null ? "shows no clear link to ROI" : `${rO <= 0 ? "goes with lower" : "goes with higher"} ROI (${Math.abs(rO) >= 0.6 ? "strong" : Math.abs(rO) >= 0.3 ? "moderate" : "weak"} link, r = ${rO.toFixed(2)})`}.</p></div>
-      <div class="drv"><span class="k">Player impact on robust ROI</span>${impHTML}<p>Average ROI of your lineups with each player minus those without him.</p></div>
+      <div class="drv"><span class="k">Player impact on ROI</span>${impHTML}<p>Average ROI of your lineups with each player minus those without him.</p></div>
     </div></div>`;
   }
 
@@ -6589,7 +6600,7 @@ if (typeof window !== "undefined") {
       const x = r.c[ci]; if (!x) return "";
       const parts = [x.bk.win, x.bk.top1, x.bk.top10, x.bk.cash], tot = parts.reduce((a, b) => a + b, 0) || 1;
       const noTop = (x.bk.top10 + x.bk.cash - c.fee) / c.fee * 100;
-      return `<div class="mrow"><div class="t"><b>${escapeHtml(c.name)}</b><span>${roiCell(x.roiCappedPct)} robust · ${x.dups >= 0.05 ? `expected duplicates ${fmtNum(x.dups)}` : "unique in field"}</span></div>
+      return `<div class="mrow"><div class="t"><b>${escapeHtml(c.name)}</b><span>${roiCell(x.roiPct)} ROI · ${x.dups >= 0.05 ? `expected duplicates ${fmtNum(x.dups)}` : "unique in field"}</span></div>
         <div class="money" title="Average payout ${fmtMoney(x.avgPayout)} per entry">${parts.map((v, k) => `<i style="width:${(v / tot * 100).toFixed(1)}%;background:${C[k]}"></i>`).join("")}</div>
         <div class="t" style="color:var(--muted)"><span>${parts.map((v, k) => `${L[k]} ${Math.round(v / tot * 100)}%`).join(" · ")}</span></div>
         <div class="t" style="color:var(--muted)"><span>Without the top 10% finishes, ROI would be <b style="color:var(--ink)">${sgnPct(noTop)}</b></span></div></div>`;
@@ -6628,30 +6639,30 @@ if (typeof window !== "undefined") {
     if (R.poolChanged) notes.push("<b>Your player pool changed since this run.</b> Run the simulation again to use the new numbers.");
     if (R.mineStale) notes.push("<b>You rebuilt your lineups after this run.</b> These results are for the previous set. Run the simulation again to score the new ones.");
     if (R.vegas) notes.push("Vegas lines are shaping this run: game totals set how much each game swings together.");
-    notes.push(`Results assume your projections are right, so treat ROI as a way to compare lineups rather than a forecast. Field: ${R.sharp}% optimizer users, the rest picking by projected ownership. Contests: ${R.contests.map(c => `<b>${escapeHtml(c.name)}</b> (${c.entries.toLocaleString()} entries, ${fmtMoney(c.fee)}, ${fmtMoney(c.pool)} prizes, top ${c.paid.toLocaleString()} paid)`).join("; ")}. <b>Robust ROI</b> pays any finish better than the field's top 0.1% as if it landed at 0.1%, so one lucky first place can't carry the average; <b>Raw ROI</b> is uncapped and swings a lot run to run.`);
+    notes.push(`Results assume your projections are right, so treat ROI as a way to compare lineups rather than a forecast. Field: ${R.sharp}% optimizer users, the rest picking by projected ownership. Contests: ${R.contests.map(c => `<b>${escapeHtml(c.name)}</b> (${c.entries.toLocaleString()} entries, ${fmtMoney(c.fee)}, ${fmtMoney(c.pool)} prizes, top ${c.paid.toLocaleString()} paid)`).join("; ")}. <b>ROI</b> is average payout against the entry fee. The top of the opponent field is extrapolated from the sampled lineups, so rare big finishes aren't over-credited, but a single first place can still move ROI a lot, so lean on Cash and Top 1% too.`);
     note.innerHTML = `<div class="simnote">${notes.join("<br>")}</div>`;
 
     if (state.simTab === "mine") {
       if (!R.mine.length) { body.innerHTML = `<div class="empty">No lineups were simulated. Build lineups on the Optimizer tab or add sim optimals, then run the simulation again.</div>`; return; }
       const sd = R.sd, CT = R.contests;
       const rows = R.mine.map((m, i) => ({ ...m, i }));
-      const val = (r, k) => { if (k === "i") return -r.i; const m = /^c(\d+)\.(\w+)$/.exec(k); if (!m) return r[k]; const x = r.c[+m[1]]; if (!x) return null; return { cash: x.cashRatePct, top1: x.top1Pct, win: x.winPct, roi: x.roiCappedPct, raw: x.roiPct }[m[2]]; };
+      const val = (r, k) => { if (k === "i") return -r.i; const m = /^c(\d+)\.(\w+)$/.exec(k); if (!m) return r[k]; const x = r.c[+m[1]]; if (!x) return null; return { cash: x.cashRatePct, top1: x.top1Pct, win: x.winPct, roi: x.roiPct }[m[2]]; };
       if (!/^c\d+\.\w+$/.test(state.simSort.key) && !["i", "proj", "mean", "p99"].includes(state.simSort.key) || (/^c(\d+)/.test(state.simSort.key) && +/^c(\d+)/.exec(state.simSort.key)[1] >= CT.length)) state.simSort = { key: "c0.roi", dir: -1 };
       const avg = (k) => rows.reduce((a, r) => a + val(r, k), 0) / rows.length;
       stats.hidden = false;
-      stats.innerHTML = CT.map((c, ci) => [[`${c.short} avg robust ROI`, sgnPct(avg(`c${ci}.roi`))], [`${c.short} best robust ROI`, sgnPct(Math.max(...rows.map(r => val(r, `c${ci}.roi`))))], [`${c.short} avg cash`, pctFmt(avg(`c${ci}.cash`))], [`${c.short} avg top 1%`, pctFmt(avg(`c${ci}.top1`))], [`${c.short} avg win`, pctFmt(avg(`c${ci}.win`))]]).flat().concat([["Avg sim score", fmtNum(avg("mean"))]]).map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
+      stats.innerHTML = CT.map((c, ci) => [[`${c.short} avg ROI`, sgnPct(avg(`c${ci}.roi`))], [`${c.short} best ROI`, sgnPct(Math.max(...rows.map(r => val(r, `c${ci}.roi`))))], [`${c.short} avg cash`, pctFmt(avg(`c${ci}.cash`))], [`${c.short} avg top 1%`, pctFmt(avg(`c${ci}.top1`))], [`${c.short} avg win`, pctFmt(avg(`c${ci}.win`))]]).flat().concat([["Avg sim score", fmtNum(avg("mean"))]]).map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
       sortRows(rows, state.simSort, val);
       note.innerHTML += driversHTML(R, R.mine.map(m => m)) + renderSimAttribution();
       const lo = Math.min(...rows.map(r => r.p10)), hi = Math.max(...rows.map(r => r.p99)); const X = (v) => ((v - lo) / (hi - lo || 1) * 100).toFixed(1);
       const cth = (k, t, first) => thS(k, t, state.simSort).replace('class="sortable n"', `class="sortable n${first ? " cg" : ""}"`);
-      const ncol = 7 + CT.length * 5;
+      const ncol = 7 + CT.length * 4;
       body.innerHTML = `<table class="simt"><thead><tr>${thS("i", "#", state.simSort, false)}<th></th><th>Lineup</th>${thS("proj", "Proj", state.simSort)}${thS("mean", "Sim avg", state.simSort)}<th>Range (10th–99th)</th>${thS("p99", "99th", state.simSort)}` +
-        CT.map((c, ci) => cth(`c${ci}.cash`, `${escapeHtml(c.short)}<br>Cash`, true) + cth(`c${ci}.top1`, `${escapeHtml(c.short)}<br>Top 1%`) + cth(`c${ci}.win`, `${escapeHtml(c.short)}<br>Win`) + cth(`c${ci}.roi`, `${escapeHtml(c.short)}<br>Robust ROI`) + cth(`c${ci}.raw`, `${escapeHtml(c.short)}<br>Raw ROI`)).join("") + "</tr></thead><tbody>" +
+        CT.map((c, ci) => cth(`c${ci}.cash`, `${escapeHtml(c.short)}<br>Cash`, true) + cth(`c${ci}.top1`, `${escapeHtml(c.short)}<br>Top 1%`) + cth(`c${ci}.win`, `${escapeHtml(c.short)}<br>Win`) + cth(`c${ci}.roi`, `${escapeHtml(c.short)}<br>ROI`)).join("") + "</tr></thead><tbody>" +
         rows.map(r => `<tr><td class="rank">${String(r.i + 1).padStart(3, "0")}</td><td><button class="why-btn" data-why="${r.i}" aria-expanded="${state.whyOpen === r.i}">Why</button></td>
           <td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="${escapeHtml(r.bucket)}|${r.rank}">${escapeHtml(r.bucket)} #${r.rank}</a>${namesOf(orderForNames(r.arr, sd))}</td>
           <td class="n">${fmtNum(r.proj)}</td><td class="n">${fmtNum(r.mean)}</td>
           <td><span class="dist" title="10th ${fmtNum(r.p10)} · median ${fmtNum(r.p50)} · 90th ${fmtNum(r.p90)} · 99th ${fmtNum(r.p99)}"><i style="left:${X(r.p10)}%;width:${(X(r.p99) - X(r.p10)).toFixed(1)}%"></i><b style="left:${X(r.p10)}%;width:${(X(r.p90) - X(r.p10)).toFixed(1)}%"></b><u style="left:${X(r.p50)}%"></u></span></td>
-          <td class="n">${fmtNum(r.p99)}</td>` + r.c.map(x => `<td class="n cg">${pctFmt(x.cashRatePct)}</td><td class="n">${pctFmt(x.top1Pct)}</td><td class="n">${pctFmt(x.winPct)}</td><td class="n">${roiCell(x.roiCappedPct)}</td><td class="n">${roiCell(x.roiPct)}</td>`).join("") + "</tr>" +
+          <td class="n">${fmtNum(r.p99)}</td>` + r.c.map(x => `<td class="n cg">${pctFmt(x.cashRatePct)}</td><td class="n">${pctFmt(x.top1Pct)}</td><td class="n">${pctFmt(x.winPct)}</td><td class="n">${roiCell(x.roiPct)}</td>`).join("") + "</tr>" +
           (state.whyOpen === r.i ? `<tr class="why-row"><td colspan="${ncol}">${whyHTML(R, r)}</td></tr>` : "")).join("") + "</tbody></table>";
       wireAttributionControls();
     } else if (state.simTab === "players") {
@@ -6689,9 +6700,9 @@ if (typeof window !== "undefined") {
     }
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);
     stats.hidden = false;
-    stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg robust ROI", sg(B.oosCap) + "%"], ["Avg raw ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
-    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${B.metric === "cash" ? "cash rate" : B.metric === "roi" ? "robust ROI" : "a blend of cash rate and robust ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat raw ROI with suspicion.</div>
-      <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Robust ROI</th><th class="n">Raw ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${sg(B.oosCap)}%</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${sg(r.cap)}%</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
+    stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg top 1%", pctFmt(B.oosTop1)], ["Avg win", pctFmt(B.oosWin)], ["Avg ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
+    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${B.metric === "cash" ? "cash rate" : B.metric === "roi" ? "ROI" : "a blend of cash rate and ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.</div>
+      <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
     if (B.res && B.fieldAvg) {
       const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));
       const ct = state.contestPresets.find(p => p.id === B.contestId);
@@ -6704,8 +6715,8 @@ if (typeof window !== "undefined") {
     const key = state.sbSort || "idx";
     rows.sort((x, y) => key === "idx" ? x.idx - y.idx : key === "median" ? x.median - y.median : y[key] - x[key]);
     const th = (k, t, n = true) => `<th class="sortable${n ? " n" : ""}" data-k="${k}"${key === k ? ' data-dir="▼"' : ""}>${t}</th>`;
-    body.innerHTML = `<table class="simt"><thead><tr>${th("idx", "#", false)}<th></th><th>Lineup</th>${th("oosCash", "Cash")}${th("oosCap", "Robust ROI")}${th("oosRoi", "Raw ROI")}${th("median", "Median rank")}<th class="n">Best rank</th></tr></thead><tbody>` +
-      rows.map(r => `<tr><td class="rank">${String(r.idx + 1).padStart(3, "0")}</td><td><button class="why-btn" data-whyb="${r.idx}" aria-expanded="${state.whyOpenB === r.idx}">Why</button></td><td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="Sim-Built|${r.idx + 1}">Sim-Built #${r.idx + 1}</a>${namesOf(orderForNames(r.arr, sd))}</td><td class="n">${pctFmt(r.oosCash)}</td><td class="n">${roiCell(r.oosCap)}</td><td class="n">${roiCell(r.oosRoi)}</td><td class="n">${r.median.toLocaleString()}</td><td class="n">${r.best.toLocaleString()}</td></tr>` + (state.whyOpenB === r.idx && B.res ? `<tr class="why-row"><td colspan="8">${whyHTML(whyR, { arr: r.arr, proj: lineupProj(r.arr), c: [B.res[r.idx]] })}</td></tr>` : "")).join("") + "</tbody></table>";
+    body.innerHTML = `<table class="simt"><thead><tr>${th("idx", "#", false)}<th></th><th>Lineup</th>${th("oosCash", "Cash")}${th("oosTop1", "Top 1%")}${th("oosWin", "Win")}${th("oosRoi", "ROI")}${th("median", "Median rank")}<th class="n">Best rank</th></tr></thead><tbody>` +
+      rows.map(r => `<tr><td class="rank">${String(r.idx + 1).padStart(3, "0")}</td><td><button class="why-btn" data-whyb="${r.idx}" aria-expanded="${state.whyOpenB === r.idx}">Why</button></td><td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="Sim-Built|${r.idx + 1}">Sim-Built #${r.idx + 1}</a>${namesOf(orderForNames(r.arr, sd))}</td><td class="n">${pctFmt(r.oosCash)}</td><td class="n">${pctFmt(r.oosTop1)}</td><td class="n">${pctFmt(r.oosWin)}</td><td class="n">${roiCell(r.oosRoi)}</td><td class="n">${r.median.toLocaleString()}</td><td class="n">${r.best.toLocaleString()}</td></tr>` + (state.whyOpenB === r.idx && B.res ? `<tr class="why-row"><td colspan="9">${whyHTML(whyR, { arr: r.arr, proj: lineupProj(r.arr), c: [B.res[r.idx]] })}</td></tr>` : "")).join("") + "</tbody></table>";
     foot.hidden = false;
     foot.innerHTML = `<span class="meta">Sim-built lineups are on the Lineups tab as their own set, ready to export.</span><button class="btn primary" id="viewBuilt">View on Lineups tab</button>`;
     $("viewBuilt").onclick = () => { state.resType = "sim"; state.resultsSite = siteKey(); state.view = "lines"; render(); window.scrollTo({ top: 0 }); };

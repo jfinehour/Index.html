@@ -1272,6 +1272,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
           <div class="field"><label for="bestN">Lineups to keep</label><input type="number" id="bestN" min="1" max="150" value="20"></div>
           <div class="field"><label for="sbStack">Max stack size</label><input type="number" id="sbStack" min="2" max="6" value="5"></div>
         </div>
+        <div class="field"><label for="sbBreadth">Search breadth</label><select id="sbBreadth" class="sel"><option value="normal" selected>Normal</option><option value="wide">Wide (off-the-board lineups, slower)</option></select><span class="hint">Wide adds random-weight builds, contrarian stacks, sim-guided builds, earlier sim-optimal lineups and two-player swaps.</span></div>
         <div class="field"><label for="sbPasses">Stability</label><select id="sbPasses" class="sel"><option value="1" selected>1 pass (fastest)</option><option value="3">3 passes (about 3x slower)</option><option value="5">5 passes (about 5x slower)</option></select><span class="hint">Each extra pass scores candidates against another sampled field and another set of random slates, then averages. Slower; in testing it did not clearly make picks steadier.</span></div>
         <div class="field"><label for="rankBy">Pick by</label><select id="rankBy" class="sel"><option value="roi" selected>ROI</option><option value="top1">Top 1% rate</option><option value="win">Win rate</option><option value="cash">Cash rate</option><option value="true">True ROI (uncapped, dupes split)</option><option value="winAdj">Win rate (dupe-adjusted)</option></select></div>
         <div class="field"><span class="flabel" id="sbTeamLbl">Teams to stack</span><div class="team-chip-grid" id="sbTeams"></div></div>
@@ -5752,7 +5753,7 @@ if (typeof window !== "undefined") {
     return true;
   }
 
-  function simBuildNeighbors(arr, isShowdown, poolPlayers, ctx, rng) {
+  function simBuildNeighbors(arr, isShowdown, poolPlayers, ctx, rng, wide) {
     const inLineup = new Set(arr.map(p => p.id));
     const out = [], seen = new Set();
     const lev = (q) => q.proj * (1 - 0.5 * ((q.ownLarge || 0) / 100));
@@ -5777,6 +5778,21 @@ if (typeof window !== "undefined") {
         if (simBuildValid(next, isShowdown, ctx)) out.push(next);
       }
     });
+    if (wide) {
+      // two-slot swaps: replace two players at once with random same-position options within ~$1,200 of each original
+      for (let k = 0; k < 12; k++) {
+        const i = Math.floor(rng() * arr.length); let j = Math.floor(rng() * arr.length); if (j === i) j = (j + 1) % arr.length;
+        const next = arr.slice(); const used = new Set(arr.map(p => p.id)); let ok = true;
+        for (const ix of [i, j]) {
+          const p = arr[ix];
+          const opts = poolPlayers.filter(q => !used.has(q.id) && q.position === p.position && Math.abs(q.salary - p.salary) <= 1200 && q.proj >= 0.5 * p.proj);
+          if (!opts.length) { ok = false; break; }
+          const q = opts[Math.floor(rng() * opts.length)]; used.add(q.id);
+          next[ix] = isShowdown ? { ...q, isCaptain: !!p.isCaptain } : q;
+        }
+        if (ok && simBuildValid(next, isShowdown, ctx)) out.push(next);
+      }
+    }
     return out;
   }
 
@@ -5817,6 +5833,7 @@ if (typeof window !== "undefined") {
       poolAttempts: 1500, ownershipField: "ownLarge", salaryCap, minSalary, ceilingWeight: parseInt(els.sliderCeilingWeight.value, 10) / 100,
       boosts: ruleBoosts(), ownershipWeight: parseInt(els.sliderLargeOwn.value, 10) / 100, maxExposureFraction: 0.7,
     };
+    const gcommonW = () => ({ ...baseGen, flexEligible, vegasContext: state.vegasContext, maxMainTeam: genMain, maxOtherTeam: genOther, secondaryStackSize: 0, tertiaryStackSize: 0 });
     const SB = Math.floor(Math.random() * 1e6); // fresh random slates and opponent fields every run (the candidate pool itself stays fixed, so picks shift a little rather than completely)
     const rng = eng.mulberry32(777);
     const existingRaw = [];
@@ -5824,7 +5841,8 @@ if (typeof window !== "undefined") {
     ["small", "large"].forEach(k => (state.results[k] || []).forEach(r => existingRaw.push(r.arr)));
     const sigOf = (arr) => (isShowdown ? eng.showdownSignature(arr) : eng.signature(arr));
     const cands = new Map(); // sig -> {arr}
-    const addCand = (arr) => { if (!simBuildValid(arr, isShowdown, ctx)) return; const s = sigOf(arr); if (!cands.has(s)) cands.set(s, { arr, sig: s }); };
+    const addCand = (arr, src) => { if (!simBuildValid(arr, isShowdown, ctx)) return; const s = sigOf(arr); if (!cands.has(s)) cands.set(s, { arr, sig: s, src: src || "base" }); };
+    const wide = sbs.breadth === "wide";
     const simArr = (arr) => {
       if (!isShowdown || !state.generationPool) return arr;
       const byId = new Map(state.generationPool.map(p => [p.id, p]));
@@ -5870,6 +5888,37 @@ if (typeof window !== "undefined") {
         });
       }
       }
+      if (wide) {
+        statusEl.textContent = "Wide search: adding off-the-board candidates…";
+        const rr = eng.mulberry32(4242 + Math.floor(Math.random() * 1e6));
+        const baseB = ruleBoosts();
+        // (1) random-weight builds: each batch gets its own random per-player bonus / penalty, plus a random 12% of players cut
+        const batches = isShowdown ? 14 : 28;
+        for (let bi = 0; bi < batches; bi++) {
+          const bm = new Map(baseB);
+          const cut = new Set();
+          for (const p of pool) {
+            if (isLocked(p.name)) continue;
+            if (rr() < 0.12) cut.add(p.id);
+            bm.set(p.name, (bm.get(p.name) || 0) + (rr() - 0.5) * 0.9);
+          }
+          const sub = pool.filter(p => !cut.has(p.id));
+          try {
+            const seed = 5000 + bi * 13 + Math.floor(rr() * 1000);
+            if (isShowdown) eng.generateShowdownCorrelated(sub, 10, { ...baseGen, boosts: bm, ownershipWeight: 0.3, poolAttempts: 700, seed, structure: { configs: [{ count: 3 + (bi % 3), team: null }] } }).forEach(r => addCand(r.arr, "random"));
+            else eng.generateCorrelatedLineups(sub, 10, { ...gcommonW(), boosts: bm, ownershipWeight: 0.3, poolAttempts: 700, seed, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: 2 + (bi % 2) }).forEach(r => addCand(r.arr, "random"));
+          } catch (e) { /* skip */ }
+        }
+        if (!isShowdown) {
+          // (5) contrarian stacks: low-owned QBs, heavy ownership fade
+          const qbsAll = pool.filter(p => p.position === "QB" && p.proj >= 13).sort((x, y) => (x.ownLarge || 0) - (y.ownLarge || 0)).slice(0, 10);
+          qbsAll.forEach((q, qi) => { for (const size of [2, 3]) try { eng.generateCorrelatedLineups(pool, 6, { ...gcommonW(), ownershipWeight: 1.0, poolAttempts: 600, seed: 6000 + qi * 7 + size, bringBackShare: 0.5, stackTeams: [q.team], stackSize: Math.min(size, ctx.maxStack) }).forEach(r => addCand(r.arr, "contrarian")); } catch (e) { /* skip */ } });
+          // (3) seed from sim-optimal lineups found by an earlier Simulate run
+          const so = (state.sim && state.sim.opt && state.sim.opt.lineups) || [];
+          so.slice(0, 60).forEach(x => addCand(x.arr, "optimal"));
+          (state.results.simopt || []).forEach(arr => addCand(arr, "optimal"));
+        }
+      }
       // raw-projection buckets last, at most as many as the leverage-built candidates
       {
         const levCount = cands.size;
@@ -5901,11 +5950,12 @@ if (typeof window !== "undefined") {
       // scorer: z-scores of cash and winsorized ROI over the initial pool
       const cashs = res.map(r => r.cashRatePct), rois = res.map(r => r.roiPct).sort((x, y) => x - y);
       const lo = rois[Math.floor(rois.length * 0.05)], hi = rois[Math.floor(rois.length * 0.95)];
-      const clampR = (v) => Math.min(hi, Math.max(lo, v));
+      // soft winsorizing: beyond the 5th/95th percentile a candidate still ranks by its raw ROI, just at 15% weight, so the top of the pool is not a tie
+      const clampR = (v) => v > hi ? hi + 0.15 * (v - hi) : v < lo ? lo + 0.15 * (v - lo) : v;
       const stat = (xs) => { const m = xs.reduce((s, v) => s + v, 0) / xs.length; const sd = Math.sqrt(xs.reduce((s, v) => s + (v - m) ** 2, 0) / xs.length) || 1; return { m, sd }; };
       const tr = res.map(r => r.roiTruePct).sort((x, y) => x - y);
       const tlo = tr[Math.floor(tr.length * 0.01)], thi = tr[Math.min(tr.length - 1, Math.floor(tr.length * 0.99))];
-      const clampT = (v) => Math.min(thi, Math.max(tlo, v)); // True ROI is winsorized at the 1st/99th percentile across lineups (uncapped payout, only extreme outliers trimmed)
+      const clampT = (v) => v > thi ? thi + 0.15 * (v - thi) : v < tlo ? tlo + 0.15 * (v - tlo) : v; // True ROI is winsorized at the 1st/99th percentile across lineups (uncapped payout, only extreme outliers trimmed)
       const sc = stat(cashs), sr = stat(res.map(r => clampR(r.roiPct))), st1 = stat(res.map(r => r.top1Pct)), sw = stat(res.map(r => r.winPct)), stt = stat(res.map(r => clampT(r.roiTruePct))), swa = stat(res.map(r => r.winAdjPct));
       scorer = (r) => {
         const zc = (r.cashRatePct - sc.m) / sc.sd, zr = (clampR(r.roiPct) - sr.m) / sr.sd, z1 = (r.top1Pct - st1.m) / st1.sd, zw = (r.winPct - sw.m) / sw.sd;
@@ -5915,14 +5965,34 @@ if (typeof window !== "undefined") {
       };
       list.forEach(x => { x.score = scorer(x.res); });
     });
+    if (wide) stages.push(async () => {
+      // (2) sim-guided: players whose candidates score above average get a bonus, then new lineups are built around them
+      statusEl.textContent = "Wide search: building around players the simulation likes…";
+      const list = [...cands.values()].filter(x => x.score != null);
+      const agg = new Map();
+      list.forEach(x => x.arr.forEach(p => { const a = agg.get(p.name) || { s: 0, n: 0 }; a.s += x.score; a.n++; agg.set(p.name, a); }));
+      const gb = new Map(ruleBoosts());
+      agg.forEach((a, name) => { if (a.n >= 5) gb.set(name, (gb.get(name) || 0) + Math.max(-0.4, Math.min(0.4, 0.25 * a.s / a.n))); });
+      const fresh = [];
+      const push = (arr) => { if (!simBuildValid(arr, isShowdown, ctx)) return; const sg = sigOf(arr); if (!cands.has(sg)) { const o = { arr, sig: sg, src: "guided" }; cands.set(sg, o); fresh.push(o); } };
+      try {
+        for (let gi = 0; gi < 3; gi++) {
+          if (isShowdown) eng.generateShowdownCorrelated(pool, 40, { ...baseGen, boosts: gb, ownershipWeight: 0.3, poolAttempts: 1500, seed: 8100 + gi, structure: { configs: [{ count: 3 + gi, team: null }] } }).forEach(r => push(r.arr));
+          else eng.generateCorrelatedLineups(pool, 50, { ...gcommonW(), boosts: gb, ownershipWeight: 0.3, poolAttempts: 2000, seed: 8100 + gi, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: 2 + (gi % 2) }).forEach(r => push(r.arr));
+        }
+      } catch (e) { /* skip */ }
+      if (!fresh.length) return;
+      const res = await evalMany(fresh.map(x => simArr(x.arr)));
+      fresh.forEach((x, i) => { x.res = res[i]; x.score = scorer(res[i]); });
+    });
     for (let round = 1; round <= 2; round++) {
       stages.push(async () => {
         statusEl.textContent = `Improving the best lineups with simulation-checked player swaps (round ${round}/2)…`;
-        const list = [...cands.values()].sort((x, y) => y.score - x.score).slice(0, 14);
+        const list = [...cands.values()].sort((x, y) => y.score - x.score).slice(0, wide ? 40 : 14);
         const fresh = [];
-        for (const x of list) for (const nb of simBuildNeighbors(x.arr, isShowdown, pool, ctx, rng)) {
+        for (const x of list) for (const nb of simBuildNeighbors(x.arr, isShowdown, pool, ctx, rng, wide)) {
           const s = sigOf(nb);
-          if (!cands.has(s)) { const o = { arr: nb, sig: s }; cands.set(s, o); fresh.push(o); }
+          if (!cands.has(s)) { const o = { arr: nb, sig: s, src: wide ? "wideswap" : "swap" }; cands.set(s, o); fresh.push(o); }
         }
         if (!fresh.length) return;
         const res = await evalMany(fresh.map(x => simArr(x.arr)));
@@ -5984,6 +6054,7 @@ if (typeof window !== "undefined") {
         rows: picked.map((x, i) => ({ inCash: x.res.cashRatePct, inRoi: x.res.roiPct, oosCash: oosMine[i].cashRatePct, oosRoi: oosMine[i].roiPct, oosCap: oosMine[i].roiCappedPct, oosTop1: oosMine[i].top1Pct, oosWin: oosMine[i].winPct, median: oosMine[i].medianRank, best: oosMine[i].bestRank, idx: i })),
         oosCash: avg(oosMine, "cashRatePct"), oosRoi: avg(oosMine, "roiPct"), oosCap: avg(oosMine, "roiCappedPct"), oosTop1: avg(oosMine, "top1Pct"), oosWin: avg(oosMine, "winPct"),
         inCash: avg(picked.map(x => x.res), "cashRatePct"), inRoi: avg(picked.map(x => x.res), "roiPct"), cmp,
+        breadth: sbs.breadth, srcCounts: picked.reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}), srcPool: [...cands.values()].reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}),
         res: oosMine, contestId: c.id, fieldAvg: fieldAverages(field), oosIters: Math.min(4000, iterations * 3),
       };
     });
@@ -6039,7 +6110,7 @@ if (typeof window !== "undefined") {
   function sbSettings() {
     const num = (id, d) => { const e = document.getElementById(id); const v = e ? parseInt(e.value, 10) : NaN; return Number.isFinite(v) ? v : d; };
     const rb = document.getElementById("rankBy");
-    return { metric: rb ? rb.value : "roi", count: Math.max(1, Math.min(150, num("bestN", 20))), sharp: num("sharp", 35), cons: num("consensus", 15), fieldPct: num("fieldRes", 35), runs: Math.min(5000, num("simIters", 1000)), maxStack: Math.max(2, Math.min(6, num("sbStack", 5))), passes: Math.max(1, Math.min(5, num("sbPasses", 1))), teams: (state.sbTeams || []).slice() };
+    return { metric: rb ? rb.value : "roi", count: Math.max(1, Math.min(150, num("bestN", 20))), sharp: num("sharp", 35), cons: num("consensus", 15), fieldPct: num("fieldRes", 35), runs: Math.min(5000, num("simIters", 1000)), maxStack: Math.max(2, Math.min(6, num("sbStack", 5))), passes: Math.max(1, Math.min(5, num("sbPasses", 1))), breadth: (document.getElementById("sbBreadth") || {}).value === "wide" ? "wide" : "normal", teams: (state.sbTeams || []).slice() };
   }
 
   function sbTeamList() {
@@ -6812,7 +6883,7 @@ if (typeof window !== "undefined") {
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);
     stats.hidden = false;
     stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg top 1%", pctFmt(B.oosTop1)], ["Avg win", pctFmt(B.oosWin)], ["Avg ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
-    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.</div>
+    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
       <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
     if (B.res && B.fieldAvg) {
       const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));

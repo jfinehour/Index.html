@@ -1273,7 +1273,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
           <div class="field"><label for="sbStack">Max stack size</label><input type="number" id="sbStack" min="2" max="6" value="5"></div>
         </div>
         <div class="field"><label for="sbPasses">Stability</label><select id="sbPasses" class="sel"><option value="1" selected>1 pass (fastest)</option><option value="3">3 passes (about 3x slower)</option><option value="5">5 passes (about 5x slower)</option></select><span class="hint">Each extra pass scores candidates against another sampled field and another set of random slates, then averages. Slower; in testing it did not clearly make picks steadier.</span></div>
-        <div class="field"><label for="rankBy">Pick by</label><select id="rankBy" class="sel"><option value="roi" selected>ROI</option><option value="top1">Top 1% rate</option><option value="win">Win rate</option><option value="cash">Cash rate</option></select></div>
+        <div class="field"><label for="rankBy">Pick by</label><select id="rankBy" class="sel"><option value="roi" selected>ROI</option><option value="top1">Top 1% rate</option><option value="win">Win rate</option><option value="cash">Cash rate</option><option value="true">True ROI (uncapped, dupes split)</option><option value="winAdj">Win rate (dupe-adjusted)</option></select></div>
         <div class="field"><span class="flabel" id="sbTeamLbl">Teams to stack</span><div class="team-chip-grid" id="sbTeams"></div></div>
         <span class="hint">Follows your Optimizer locks, excludes, max per team, min salary and TE-in-FLEX settings.</span>
       </div>
@@ -3547,6 +3547,43 @@ function buildSyntheticField(players, opts) {
  * buildSyntheticField). Cheap relative to field construction — safe to
  * call once per lineup you want to check, reusing the same field object.
  */
+/**
+ * Estimates how many OTHER real entries share each user lineup's exact roster, from the field itself:
+ * realized per-player ownership multiplied up by how much more often a QB's teammates / bring-back
+ * appear alongside him than independence would predict. Returns an array of expected extra copies.
+ * (Classic rosters only; Showdown returns zeros.)
+ */
+function estimateDupes(userLineups, field, opts = {}) {
+  const { lift = 1, maxPairLift = 60 } = opts;
+  const { archetypes, archetypeWeights, totalEntries } = field;
+  const W = archetypeWeights.reduce((a, b) => a + b, 0) || 1;
+  const own = new Map(), joint = new Map(); // id -> share ; "qb|id" -> share
+  archetypes.forEach((a, i) => {
+    const w = archetypeWeights[i] / W;
+    const qb = a.find(p => p.position === "QB");
+    for (const p of a) {
+      own.set(p.id, (own.get(p.id) || 0) + w);
+      if (qb && p.id !== qb.id) { const k = qb.id + "|" + p.id; joint.set(k, (joint.get(k) || 0) + w); }
+    }
+  });
+  return userLineups.map(arr => {
+    if (arr.some(p => p.isCaptain)) return 0;
+    const qb = arr.find(p => p.position === "QB");
+    let logP = 0;
+    for (const p of arr) logP += Math.log(Math.max(0.002, own.get(p.id) || 0));
+    if (qb) {
+      const oq = Math.max(0.002, own.get(qb.id) || 0);
+      for (const p of arr) {
+        if (p.id === qb.id) continue;
+        if (p.team !== qb.team && p.team !== oppTeam(qb)) continue;
+        const op = Math.max(0.002, own.get(p.id) || 0), j = joint.get(qb.id + "|" + p.id) || 0;
+        logP += Math.log(Math.min(maxPairLift, Math.max(1, j / (oq * op))));
+      }
+    }
+    return Math.max(0, totalEntries * Math.exp(logP) * lift);
+  });
+}
+
 function simulateContestROIMulti(userLineups, field, opts) {
   const {
     payoutTable, entryFee, iterations = 300, seed = 1,
@@ -3597,6 +3634,8 @@ function simulateContestROIMulti(userLineups, field, opts) {
   const L = userLineups.length;
   const totalPayout = new Array(L).fill(0), cashCount = new Array(L).fill(0);
   const totalPayoutCapped = new Array(L).fill(0);
+  const dupEst = Array.isArray(opts.dupEst) ? opts.dupEst : null;
+  const totalPayoutTrue = new Array(L).fill(0), winAdj = new Array(L).fill(0);
   // Robust-ROI cap: any finish better than the field's top 0.1% is paid as if it
   // landed at exactly 0.1%, so a handful of simulated 1st-place hits can't dominate.
   const capRank = Math.max(1, Math.round(0.001 * archetypeWeights.reduce((s, w) => s + w, 0)));
@@ -3736,6 +3775,7 @@ function simulateContestROIMulti(userLineups, field, opts) {
         totalPayout[li] += pay;
         totalPayoutCapped[li] += sumRange(r0, r1, capRank) / g;
         cashCount[li] += cashRange(r0, r1) / g;
+        totalPayoutTrue[li] += pay; if (r0 <= 1) winAdj[li] += 1 / g;
         continue;
       }
       const estRank = Math.max(1, Math.round(weightAbove) + 1);
@@ -3745,6 +3785,15 @@ function simulateContestROIMulti(userLineups, field, opts) {
       totalPayout[li] += payout;
       totalPayoutCapped[li] += payoutForRank(Math.max(estRank, capRank), payoutTable);
       if (payout > 0) cashCount[li]++;
+      // Expected-duplicate adjustment: if D other real entries hold this exact roster they tie, and the
+      // group splits the prizes for the ranks it jointly fills (fractional D is interpolated).
+      const D = dupEst ? dupEst[li] || 0 : 0;
+      if (D > 0.001) {
+        const g0 = 1 + Math.floor(D), fr = D - Math.floor(D);
+        const split = (g) => sumRange(estRank, estRank + g - 1, 1) / g;
+        totalPayoutTrue[li] += (1 - fr) * split(g0) + fr * split(g0 + 1);
+        if (estRank <= 1) winAdj[li] += (1 - fr) / g0 + fr / (g0 + 1);
+      } else { totalPayoutTrue[li] += payout; if (estRank <= 1) winAdj[li] += 1; }
     }
   }
 
@@ -3756,6 +3805,9 @@ function simulateContestROIMulti(userLineups, field, opts) {
       avgPayout,
       roiPct: ((avgPayout - entryFee) / entryFee) * 100,
       roiCappedPct: ((totalPayoutCapped[li] / n - entryFee) / entryFee) * 100,
+      roiTruePct: ((totalPayoutTrue[li] / n - entryFee) / entryFee) * 100, // uncapped, duplicates split the prizes they tie for
+      winAdjPct: (winAdj[li] / n) * 100,
+      dupEst: dupEst ? dupEst[li] || 0 : 0,
       cashRatePct: (cashCount[li] / n) * 100,
       medianRank: rk[Math.floor(n / 2)],
       bestRank: rk[0],
@@ -4034,7 +4086,7 @@ const DFSEngine = {
   overlapCount, generateTopN, generateCorrelatedLineups,
   solveExactOptimal, boundedKnapsackTable, convolve, reconstruct, parseVegasLines, swapNeighbors,
   parseOddsApiResponse, nflTeamNameToAbbr, simulateLineups, boxMullerZ, splitNormalFromZ,
-  parsePayoutTable, parseContestEntryCount, payoutForRank, simulateContestROI, simulateContestROIMulti, buildSyntheticField,
+  parsePayoutTable, parseContestEntryCount, payoutForRank, estimateDupes, simulateContestROI, simulateContestROIMulti, buildSyntheticField,
   showdownStructureOk, showdownSplitAllowed, buildShowdownScenarioPool,
   buildFieldArchetype, buildShowdownFieldArchetype, weightedRandomPick,
   solveExactShowdownOptimal, buildShowdownLineup, swapShowdownNeighbors, generateShowdownTopN,
@@ -5642,7 +5694,7 @@ if (typeof window !== "undefined") {
   /** Builds (or reuses a cached) synthetic opponent field for the given contest. */
   function getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed = 1 }) {
     const fieldPlayers = state.generationPool || state.players;
-    const fieldKey = [c.totalEntries, fieldSampleSize, sharpShare, consensusShare, isShowdown, getSalaryCap(), seed].join("|");
+    const fieldKey = [c.totalEntries, fieldSampleSize, sharpShare, consensusShare, isShowdown, getSalaryCap(), seed, "rake"].join("|");
     let field;
     if (state.fieldCache && state.fieldCache.players === fieldPlayers && state.fieldCache.key === fieldKey) {
       field = state.fieldCache.field; // same inputs as last run — reuse the built field
@@ -5650,6 +5702,7 @@ if (typeof window !== "undefined") {
       field = eng.buildSyntheticField(fieldPlayers, {
         totalEntries: c.totalEntries, fieldSampleSize, seed, sharpShare, consensusShare,
         ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
+        rakeOwnership: true, // calibrate the FULL blended field (casual + sharp + consensus) to the published ownership
       });
       state.fieldCache = { players: fieldPlayers, key: fieldKey, field };
     }
@@ -5701,15 +5754,23 @@ if (typeof window !== "undefined") {
 
   function simBuildNeighbors(arr, isShowdown, poolPlayers, ctx, rng) {
     const inLineup = new Set(arr.map(p => p.id));
-    const out = [];
+    const out = [], seen = new Set();
+    const lev = (q) => q.proj * (1 - 0.5 * ((q.ownLarge || 0) / 100));
     arr.forEach((p, i) => {
-      let elig = poolPlayers.filter(q => !inLineup.has(q.id) && (isShowdown || q.position === p.position || (ctx.flexEligible.has(q.position) && ctx.flexEligible.has(p.position))));
+      const elig = poolPlayers.filter(q => !inLineup.has(q.id) && (isShowdown || q.position === p.position || (ctx.flexEligible.has(q.position) && ctx.flexEligible.has(p.position))));
       if (elig.length === 0) return;
-      const lev = (q) => q.proj * (1 - 0.5 * ((q.ownLarge || 0) / 100));
-      elig.sort((x, y) => lev(y) - lev(x));
-      const picks = elig.slice(0, 8);
-      const rest = elig.slice(8);
-      for (let k = 0; k < 5 && rest.length; k++) picks.push(rest.splice(Math.floor(rng() * rest.length), 1)[0]);
+      const picks = [];
+      const add = (q) => { if (q && !picks.includes(q)) picks.push(q); };
+      // position-matched pivots: same position, within $800 of the player being replaced (the Hurst -> Tez kind of swap)
+      const band = elig.filter(q => q.position === p.position && Math.abs(q.salary - p.salary) <= 800);
+      band.slice().sort((x, y) => lev(y) - lev(x)).slice(0, 5).forEach(add);
+      band.slice().sort((x, y) => y.proj - x.proj).slice(0, 3).forEach(add);
+      band.slice().sort((x, y) => (x.ownLarge || 0) - (y.ownLarge || 0) || y.proj - x.proj).filter(q => q.proj >= 0.6 * p.proj).slice(0, 2).forEach(add);
+      // plus the broader leverage leaders and a few random ones
+      const byLev = elig.slice().sort((x, y) => lev(y) - lev(x));
+      byLev.slice(0, 4).forEach(add);
+      const rest = byLev.slice(4).filter(q => !picks.includes(q));
+      for (let k = 0; k < 3 && rest.length; k++) add(rest.splice(Math.floor(rng() * rest.length), 1)[0]);
       for (const q of picks) {
         const next = arr.slice();
         next[i] = isShowdown ? { ...q, isCaptain: !!p.isCaptain } : q;
@@ -5773,7 +5834,10 @@ if (typeof window !== "undefined") {
     const stages = [];
     stages.push(() => {
       statusEl.textContent = "Building a broad candidate pool…";
-      existingRaw.forEach(addCand);
+      // Raw-projection buckets (Projection / Ceiling) are chalk-heavy; they're added AFTER the leverage builds and
+      // capped so at least half the pool is leverage / ownership-faded.
+      ["small", "large"].forEach(k => (state.results[k] || []).forEach(r => addCand(r.arr)));
+      const chalkNames = pool.filter(p => (p.ownLarge || 0) >= 20 && !isLocked(p.name)).sort((x, y) => (y.ownLarge || 0) - (x.ownLarge || 0)).slice(0, 14);
       for (let pp = 0; pp < passes; pp++) {
       if (isShowdown) {
         const sel = ctx.allowedTeams ? [...ctx.allowedTeams] : null;
@@ -5782,9 +5846,20 @@ if (typeof window !== "undefined") {
         gens.forEach((structure, gi) => {
           eng.generateShowdownCorrelated(pool, gi === 0 ? 120 : 50, { ...baseGen, poolAttempts: 2500, seed: 31 + gi + pp * 1000, structure }).forEach(r => addCand(r.arr));
         });
+        // heavier ownership fade, and one-at-a-time exclusion of each 20%+ owned player
+        eng.generateShowdownCorrelated(pool, 100, { ...baseGen, ownershipWeight: 1.0, poolAttempts: 2500, seed: 77 + pp * 1000, structure: cfg(4) }).forEach(r => addCand(r.arr));
+        chalkNames.forEach((cp, ci) => {
+          try { eng.generateShowdownCorrelated(pool.filter(q => q.id !== cp.id), 25, { ...baseGen, poolAttempts: 900, seed: 90 + ci + pp * 1000, structure: cfg(4) }).forEach(r => addCand(r.arr)); } catch (e) { /* skip */ }
+        });
       } else {
         const gcommon = { ...baseGen, flexEligible, vegasContext: state.vegasContext, maxMainTeam: genMain, maxOtherTeam: genOther, secondaryStackSize: 0, tertiaryStackSize: 0 };
         eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31 + pp * 1000, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
+        // heavier ownership fade than the sidebar slider (true leverage builds)
+        eng.generateCorrelatedLineups(pool, 150, { ...gcommon, ownershipWeight: 1.0, poolAttempts: 3500, seed: 77 + pp * 1000, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
+        // chalk-exclusion recipe: build with each 20%+ owned player removed, one at a time, so no-chalk lineups get scored too
+        chalkNames.forEach((cp, ci) => {
+          try { eng.generateCorrelatedLineups(pool.filter(q => q.id !== cp.id), 30, { ...gcommon, poolAttempts: 1200, seed: 90 + ci + pp * 1000, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr)); } catch (e) { /* skip */ }
+        });
         const qbs = pool.filter(p => p.position === "QB");
         const topQb = Math.max(...qbs.map(p => p.proj), 0);
         const teams = [...new Set(qbs.filter(p => p.proj >= 0.6 * topQb).map(p => p.team))];
@@ -5794,6 +5869,12 @@ if (typeof window !== "undefined") {
           }
         });
       }
+      }
+      // raw-projection buckets last, at most as many as the leverage-built candidates
+      {
+        const levCount = cands.size;
+        let added = 0;
+        ["proj", "ceil"].forEach(k => (state.results[k] || []).forEach(arr => { if (added < levCount) { const n0 = cands.size; addCand(arr); added += cands.size - n0; } }));
       }
     });
     let field, fields, evalMany, scorer, scored = [], simBase;
@@ -5808,9 +5889,9 @@ if (typeof window !== "undefined") {
         let acc = null;
         for (let pp = 0; pp < passes; pp++) {
           if (pp > 0) { statusEl.textContent = `Pass ${pp + 1} of ${passes}…`; await new Promise(r => setTimeout(r, 15)); }
-          const r = eng.simulateContestROIMulti(arrs, fields[pp], { ...simBase, seed: 101 + pp + SB });
-          if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes, top1Pct: x.top1Pct / passes, winPct: x.winPct / passes }));
-          else r.forEach((x, i) => { acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; acc[i].top1Pct += x.top1Pct / passes; acc[i].winPct += x.winPct / passes; });
+          const r = eng.simulateContestROIMulti(arrs, fields[pp], { ...simBase, seed: 101 + pp + SB, dupEst: isShowdown ? null : eng.estimateDupes(arrs, fields[pp]) });
+          if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes, roiTruePct: x.roiTruePct / passes, winAdjPct: x.winAdjPct / passes, dupEst: x.dupEst / passes, top1Pct: x.top1Pct / passes, winPct: x.winPct / passes }));
+          else r.forEach((x, i) => { acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; acc[i].roiTruePct += x.roiTruePct / passes; acc[i].winAdjPct += x.winAdjPct / passes; acc[i].dupEst += x.dupEst / passes; acc[i].top1Pct += x.top1Pct / passes; acc[i].winPct += x.winPct / passes; });
         }
         return acc;
       };
@@ -5822,11 +5903,15 @@ if (typeof window !== "undefined") {
       const lo = rois[Math.floor(rois.length * 0.05)], hi = rois[Math.floor(rois.length * 0.95)];
       const clampR = (v) => Math.min(hi, Math.max(lo, v));
       const stat = (xs) => { const m = xs.reduce((s, v) => s + v, 0) / xs.length; const sd = Math.sqrt(xs.reduce((s, v) => s + (v - m) ** 2, 0) / xs.length) || 1; return { m, sd }; };
-      const sc = stat(cashs), sr = stat(res.map(r => clampR(r.roiPct))), st1 = stat(res.map(r => r.top1Pct)), sw = stat(res.map(r => r.winPct));
+      const tr = res.map(r => r.roiTruePct).sort((x, y) => x - y);
+      const tlo = tr[Math.floor(tr.length * 0.01)], thi = tr[Math.min(tr.length - 1, Math.floor(tr.length * 0.99))];
+      const clampT = (v) => Math.min(thi, Math.max(tlo, v)); // True ROI is winsorized at the 1st/99th percentile across lineups (uncapped payout, only extreme outliers trimmed)
+      const sc = stat(cashs), sr = stat(res.map(r => clampR(r.roiPct))), st1 = stat(res.map(r => r.top1Pct)), sw = stat(res.map(r => r.winPct)), stt = stat(res.map(r => clampT(r.roiTruePct))), swa = stat(res.map(r => r.winAdjPct));
       scorer = (r) => {
         const zc = (r.cashRatePct - sc.m) / sc.sd, zr = (clampR(r.roiPct) - sr.m) / sr.sd, z1 = (r.top1Pct - st1.m) / st1.sd, zw = (r.winPct - sw.m) / sw.sd;
         // win rate is zero for most candidates, so break ties with top 1% rate
-        return metric === "cash" ? zc : metric === "top1" ? z1 : metric === "win" ? zw + 0.02 * z1 : zr;
+        const ztr = (clampT(r.roiTruePct) - stt.m) / stt.sd, zwa = (r.winAdjPct - swa.m) / swa.sd;
+        return metric === "cash" ? zc : metric === "top1" ? z1 : metric === "win" ? zw + 0.02 * z1 : metric === "true" ? ztr : metric === "winAdj" ? zwa + 0.02 * ztr : zr;
       };
       list.forEach(x => { x.score = scorer(x.res); });
     });
@@ -5881,7 +5966,8 @@ if (typeof window !== "undefined") {
       // Validate on fresh slates with 3x the runs (less noise), then ORDER the picks by that
       // validated score — the selection-time ranking carries luck from the search itself.
       const oosField = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 99 + SB });
-      const oos = eng.simulateContestROIMulti([...mine, ...base], oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 + SB });
+      const oosAll = [...mine, ...base];
+      const oos = eng.simulateContestROIMulti(oosAll, oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 + SB, dupEst: isShowdown ? null : eng.estimateDupes(oosAll, oosField) });
       let oosMine = oos.slice(0, mine.length);
       const oosBase = oos.slice(mine.length);
       const order = picked.map((_, i) => i).sort((i, j) => scorer(oosMine[j]) - scorer(oosMine[i]));
@@ -6726,7 +6812,7 @@ if (typeof window !== "undefined") {
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);
     stats.hidden = false;
     stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg top 1%", pctFmt(B.oosTop1)], ["Avg win", pctFmt(B.oosWin)], ["Avg ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
-    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.</div>
+    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.</div>
       <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
     if (B.res && B.fieldAvg) {
       const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));

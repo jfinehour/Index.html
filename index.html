@@ -1067,6 +1067,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
           <span class="hint" id="lineTypeHint"></span></div>
 
         <div class="gppbox" id="gppBox" hidden>
+          <label class="chk" style="display:flex;gap:8px;align-items:flex-start;margin:0 0 10px"><input type="checkbox" id="tuneContest" checked><span><b>Tune to contest</b> <span class="hint">Small and Large Field builds are re-scored in the contest simulation (Small: "Small field", Large: "Large field" presets) and keep the lineups that do best on ROI and top 1% rate. Uses your stack, team and exposure settings. Adds about 20–30 seconds.</span></span></label>
           <div class="slider-group">
             <div class="slider-label"><b>Leverage ceiling weight</b><span class="val" id="valCeilingWeight">100% Ceiling</span></div>
             <input type="range" id="sliderCeilingWeight" min="0" max="100" value="100">
@@ -5167,6 +5168,9 @@ if (typeof window !== "undefined") {
     setTimeout(() => {
       let ok = false;
       try { ok = runBuild(type); } catch (err) { console.error(err); setStatus("Build error: " + err.message, true); }
+      const tuneEl = document.getElementById("tuneContest");
+      const doTune = ok && (type === "small" || type === "large") && state.contestType !== "showdown" && tuneEl && tuneEl.checked && (state.results[type] || []).length;
+      const finish = () => {
       building = false; els.generateBtn.disabled = false; setProg(ok ? 100 : 0);
       if (ok) {
         state.resType = type; state.resTab = "lineups"; state.resultsSite = siteKey();
@@ -5177,6 +5181,9 @@ if (typeof window !== "undefined") {
       if (ok && (state.results[type] || []).length) state.view = "lines";
       render();
       if (ok) window.scrollTo({ top: 0 });
+      };
+      if (doTune) tuneToContest(type).then(finish, (err) => { console.error(err); setStatus("Contest tuning skipped: " + err.message, true); finish(); });
+      else finish();
     }, 30);
   }
 
@@ -5254,6 +5261,108 @@ if (typeof window !== "undefined") {
     return true;
   }
 
+  /* ---------------- Contest-tuned Small / Large Field builds ---------------- */
+  // The GPP builders rank lineups by a hand-made score (ceiling x ownership discount). That score never sees the
+  // contest payouts, the opponent field or duplicates. This step keeps the user's own settings (stacks, team limits,
+  // locks, ownership slider) but builds a wider family of candidates around them, scores every one in the contest
+  // simulation, and keeps the ones that do best on a blend of ROI and top 1% rate.
+  function tuneContestFor(type) {
+    const ok = state.contestPresets.filter(c => c.payoutTable && c.totalEntries && c.entryFee != null);
+    if (!ok.length) return null;
+    const pref = ok.find(c => c.id === (type === "small" ? "preset_small_single" : "preset_large_single"));
+    if (pref) return pref;
+    return ok.slice().sort((a, b) => type === "small" ? a.totalEntries - b.totalEntries : b.totalEntries - a.totalEntries)[0];
+  }
+  async function tuneToContest(type) {
+    const c = tuneContestFor(type);
+    if (!c) return;
+    const tick = () => new Promise(r => setTimeout(r, 15));
+    const n = lineupCount(), expFrac = expFracFor(type);
+    const salaryCap = getSalaryCap();
+    const flexEligible = els.toggleTEFlex.checked ? new Set(["RB", "WR", "TE"]) : new Set(["RB", "WR"]);
+    const minProj = parseFloat(els.sliderMinProj.value);
+    const keepName = (p) => isLocked(p.name) || ((ruleOf(p.name) || {}).min > 0);
+    const pool = state.players.filter(p => !isExcl(p.name) && (p.proj >= minProj || keepName(p)));
+    const minSalaryPct = parseInt(els.sliderMinSalary.value, 10);
+    const minSalary = minSalaryPct > 0 ? Math.round((minSalaryPct / 100) * salaryCap) : 0;
+    const ownField = type === "small" ? "own" : "ownLarge";
+    const ownW = parseInt((type === "small" ? els.sliderSmallOwn : els.sliderLargeOwn).value, 10) / 100;
+    const ceilingWeight = parseInt(els.sliderCeilingWeight.value, 10) / 100;
+    const maxMainTeam = parseInt(els.sliderMaxMainTeam.value, 10), maxOtherTeam = parseInt(els.sliderMaxOtherTeam.value, 10);
+    const stackSize = parseInt(els.sliderStackSize.value, 10);
+    const sbs = sbSettings();
+    const baseOpts = {
+      poolAttempts: 2500, ownershipField: ownField, flexEligible, salaryCap, minSalary, ceilingWeight, boosts: ruleBoosts(), maxMainTeam, maxOtherTeam,
+      requireNames: lockedNames(), ownershipWeight: ownW, bringBackShare: parseInt(els.sliderBringback.value, 10) / 100, maxExposureFraction: 0.7,
+      stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize: stackSizeFromSlider(parseInt(els.sliderSecondaryStack.value, 10)),
+      tertiaryStackSize: stackSizeFromSlider(parseInt(els.sliderTertiaryStack.value, 10)), vegasContext: state.vegasContext,
+    };
+    const ctx = {
+      salaryCap, minSalary, flexEligible, teamCount: new Set(pool.map(p => p.team)).size, maxMainTeam, maxOtherTeam,
+      maxStack: 6, allowedTeams: state.selectedTeams && state.selectedTeams.size ? new Set(state.selectedTeams) : null, locks: lockedNames(),
+    };
+    const cands = new Map();
+    const add = (arr, src) => { if (!simBuildValid(arr, false, ctx)) return; const sg = eng.signature(arr); if (!cands.has(sg)) cands.set(sg, { arr, src }); };
+    const gen = (p, count, over, seed) => { try { eng.generateCorrelatedLineups(p, count, { ...baseOpts, ...over, seed }).forEach(r => add(r.arr, "build")); } catch (e) { /* skip */ } };
+    setStatus(`Tuning ${TYPE_LABEL[type]} lineups to ${c.label}: building candidates…`); setProg(30); await tick();
+    // the user's own build first (same settings and seed family), then deliberate variations around it
+    (state.results[type] || []).forEach(r => add(r.arr, "orig"));
+    const origSigs = new Set((state.results[type] || []).map(r => eng.signature(r.arr)));
+    gen(pool, 150, {}, 301);
+    gen(pool, 100, { ownershipWeight: ownW * 0.5 }, 302);
+    gen(pool, 100, { ownershipWeight: Math.min(1, Math.max(0.3, ownW * 1.5)) }, 303);
+    gen(pool, 100, { ceilingWeight: Math.min(1, ceilingWeight) === 1 ? 0.7 : 1 }, 304);
+    const chalk = pool.filter(p => (p[ownField] || 0) >= 20 && !isLocked(p.name)).sort((a, b) => (b[ownField] || 0) - (a[ownField] || 0)).slice(0, 10);
+    chalk.forEach((cp, i) => gen(pool.filter(q => q.id !== cp.id), 20, { poolAttempts: 900 }, 310 + i));
+    await tick();
+    const fieldSampleSize = resolveFieldSize(sbs.fieldPct, c.totalEntries);
+    const iterations = Math.min(1500, sbs.runs);
+    const SB = Math.floor(Math.random() * 1e6);
+    const field = getContestField(c, { fieldSampleSize, sharpShare: sbs.sharp / 100, consensusShare: sbs.cons / 100, isShowdown: false, seed: 1 + SB });
+    const simBase = { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations, vegasContext: state.vegasContext };
+    const evalMany = (arrs) => eng.simulateContestROIMulti(arrs, field, { ...simBase, seed: 101 + SB, dupEst: eng.estimateDupes(arrs, field) });
+    setStatus(`Tuning ${TYPE_LABEL[type]} lineups to ${c.label}: scoring ${cands.size.toLocaleString()} candidates…`); setProg(55); await tick();
+    let list = [...cands.values()];
+    let res = evalMany(list.map(x => x.arr));
+    list.forEach((x, i) => { x.res = res[i]; });
+    const stat = (xs) => { const m = xs.reduce((a, v) => a + v, 0) / xs.length; return { m, sd: Math.sqrt(xs.reduce((a, v) => a + (v - m) ** 2, 0) / xs.length) || 1 }; };
+    const sorted = res.map(r => r.roiTruePct).sort((a, b) => a - b);
+    const lo = sorted[Math.floor(sorted.length * 0.05)], hi = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+    const soft = (v) => v > hi ? hi + 0.15 * (v - hi) : v < lo ? lo + 0.15 * (v - lo) : v;
+    const sr = stat(res.map(r => soft(r.roiTruePct))), st = stat(res.map(r => r.top1Pct));
+    const scorer = (r) => 0.5 * (soft(r.roiTruePct) - sr.m) / sr.sd + 0.5 * (r.top1Pct - st.m) / st.sd;
+    list.forEach(x => { x.score = scorer(x.res); });
+    // one round of simulation-checked swaps around the best
+    setStatus(`Tuning ${TYPE_LABEL[type]} lineups to ${c.label}: improving the best with player swaps…`); setProg(75); await tick();
+    const rng = eng.mulberry32(909);
+    const fresh = [];
+    for (const x of list.slice().sort((a, b) => b.score - a.score).slice(0, 12)) for (const nb of simBuildNeighbors(x.arr, false, pool, ctx, rng, false)) {
+      const sg = eng.signature(nb);
+      if (!cands.has(sg)) { const o = { arr: nb, src: "swap" }; cands.set(sg, o); fresh.push(o); }
+    }
+    if (fresh.length) { const r2 = evalMany(fresh.map(x => x.arr)); fresh.forEach((x, i) => { x.res = r2[i]; x.score = scorer(r2[i]); }); }
+    // choose n with the same exposure / lock / ownership-cap rules as every other build
+    const ranked = [...cands.values()].sort((a, b) => b.score - a.score);
+    const chosen = selectWithRules(ranked, n, expFrac, x => x.arr);
+    // honest check on fresh slates and a fresh field: tuned picks vs the original, untuned build
+    setStatus(`Tuning ${TYPE_LABEL[type]} lineups to ${c.label}: re-testing on fresh simulated slates…`); setProg(90); await tick();
+    const oosField = getContestField(c, { fieldSampleSize, sharpShare: sbs.sharp / 100, consensusShare: sbs.cons / 100, isShowdown: false, seed: 99 + SB });
+    const origArrs = (state.results[type] || []).map(r => r.arr), tunedArrs = chosen.map(x => x.arr);
+    const allArrs = [...tunedArrs, ...origArrs];
+    const oos = eng.simulateContestROIMulti(allArrs, oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 + SB, dupEst: eng.estimateDupes(allArrs, oosField) });
+    const avg = (rs, k) => rs.length ? rs.reduce((a, r) => a + r[k], 0) / rs.length : null;
+    const tOos = oos.slice(0, tunedArrs.length), oOos = oos.slice(tunedArrs.length);
+    const hasBB = (arr) => { const q = arr.find(p => p.position === "QB"); return !!q && arr.some(p => p.team === eng.oppTeam(q) && p.position !== "DST"); };
+    const oldMeta = state.resultsMeta[type] || {};
+    state.results[type] = chosen.map(x => ({ arr: x.arr, bringBack: hasBB(x.arr), score: lineupLeverageScore(x.arr, oldMeta) }));
+    state.resultsMeta[type] = { ...oldMeta, tuned: {
+      contest: c.label, kept: chosen.filter(x => origSigs.has(eng.signature(x.arr))).length, evaluated: cands.size, oosIters: Math.min(4000, iterations * 3),
+      tuned: { cash: avg(tOos, "cashRatePct"), top1: avg(tOos, "top1Pct"), roi: avg(tOos, "roiTruePct") },
+      orig: { cash: avg(oOos, "cashRatePct"), top1: avg(oOos, "top1Pct"), roi: avg(oOos, "roiTruePct") },
+    } };
+    setProg(100);
+  }
+
   els.generateBtn.addEventListener("click", buildLineups);
   els.lineType.addEventListener("change", () => { syncLineType(); });
 
@@ -5312,6 +5421,10 @@ if (typeof window !== "undefined") {
     if (meta.boosts && meta.boosts.size > 0) {
       const list = [...meta.boosts.entries()].map(([name, f]) => `${escapeHtml(name)} ${f > 0 ? "+" : ""}${Math.round(f * 100)}%`).join(", ");
       parts.push(`<b>Player boosts:</b> ${list} (selection only — real Proj/Ceiling unchanged)`);
+    }
+    if (meta.tuned) {
+      const t = meta.tuned, f = (v) => v == null ? "—" : v.toFixed(2), g = (v) => v == null ? "—" : (v >= 0 ? "+" : "") + v.toFixed(1) + "%";
+      parts.push(`<b>Tuned to ${escapeHtml(t.contest)}:</b> ${t.evaluated.toLocaleString()} candidates scored in the simulation, ${t.kept} of the original lineups kept. Fresh-slate check (${t.oosIters.toLocaleString()} runs), tuned vs original: top 1% ${f(t.tuned.top1)}% vs ${f(t.orig.top1)}%, cash ${f(t.tuned.cash)}% vs ${f(t.orig.cash)}%, ROI ${g(t.tuned.roi)} vs ${g(t.orig.roi)}`);
     }
     if (meta.maxMainTeam > 0) parts.push(`<b>Max main stack team:</b> ${meta.maxMainTeam} player${meta.maxMainTeam === 1 ? "" : "s"}`);
     if (meta.maxOtherTeam > 0) parts.push(`<b>Max any other team:</b> ${meta.maxOtherTeam} player${meta.maxOtherTeam === 1 ? "" : "s"}`);

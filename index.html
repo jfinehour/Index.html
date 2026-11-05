@@ -4964,10 +4964,13 @@ if (typeof window !== "undefined") {
 
     const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/?apiKey=${encodeURIComponent(key)}&regions=us&markets=spreads,totals&oddsFormat=american`;
     try {
-      const resp = await fetch(url);
+      let resp;
+      try { resp = await fetch(url, { cache: "no-store" }); }
+      catch (netErr) { const e = new Error("The request never reached the-odds-api.com (the browser reported \"" + (netErr && netErr.message || "network error") + "\"). The API does allow browser requests, so the usual causes are an ad / tracker / content blocker or private-relay setting blocking api.the-odds-api.com, a VPN or network filter, or being offline. Try another browser or turn the blocker off for this page, or paste the JSON below."); e.netFail = true; throw e; }
       if (!resp.ok) {
         const bodyText = await resp.text().catch(() => "");
-        throw new Error(`API returned ${resp.status}. ${bodyText.slice(0, 150)}`);
+        const hint = resp.status === 401 ? " Check the API key (copy it again from the-odds-api.com)." : resp.status === 429 ? " The key's request quota is used up for now." : resp.status === 422 ? " The API rejected the request." : "";
+        throw new Error(`API returned ${resp.status}.${hint} ${bodyText.slice(0, 150)}`);
       }
       const json = await resp.json();
       const ctx = eng.parseOddsApiResponse(json);
@@ -4978,7 +4981,7 @@ if (typeof window !== "undefined") {
       els.vegasText.value = JSON.stringify(json);
       safeStorageSet(STORAGE_KEY_VEGAS, JSON.stringify(json));
     } catch (err) {
-      els.vegasStatus.textContent = "Live fetch failed (likely CORS-blocked) — paste the JSON below instead. " + err.message;
+      els.vegasStatus.textContent = (err.netFail ? "Live fetch failed. " : "Live fetch failed: ") + err.message + (err.netFail ? "" : " You can also paste the JSON below.");
       els.vegasStatus.className = "vegas-status err";
     } finally {
       els.vegasFetchLiveBtn.disabled = false;

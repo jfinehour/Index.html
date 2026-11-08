@@ -5861,6 +5861,8 @@ if (typeof window !== "undefined") {
     for (const k of ["RB", "WR", "TE"]) if (sur[k] === 1 && !ctx.flexEligible.has(k)) return false;
     const sal = arr.reduce((s, p) => s + p.salary, 0);
     if (sal > ctx.salaryCap || sal < ctx.minSalary) return false;
+    // a defense is negatively correlated with the offense it faces: never against your QB, and not against two or more of your players
+    { const dst = arr.find(p => p.position === "DST"); if (dst) { const faced = eng.oppTeam(dst); let k = 0; for (const p of arr) if (p.position !== "DST" && p.team === faced) { if (p.position === "QB") return false; k++; } if (k >= 2) return false; } }
     const tc = new Map();
     for (const p of arr) if (p.position !== "DST") tc.set(p.team, (tc.get(p.team) || 0) + 1);
     const counts = [...tc.values()].sort((x, y) => y - x);
@@ -5894,6 +5896,22 @@ if (typeof window !== "undefined") {
         if (simBuildValid(next, isShowdown, ctx)) out.push(next);
       }
     });
+    if (!isShowdown) {
+      // in-game partner swaps: replace a player with someone from the same game as another lineup member (teammate or opponent), keeping it out of the QB's own team
+      const qb = arr.find(p => p.position === "QB");
+      const gameOf = (q) => [q.team, eng.oppTeam(q)].sort().join("-");
+      for (let k = 0; k < 10; k++) {
+        const i = Math.floor(rng() * arr.length), p = arr[i];
+        if (p.position === "QB") continue;
+        const anchors = arr.filter((a, ix) => ix !== i && a.position !== "DST" && (!qb || a.team !== qb.team) && a.id !== (qb && qb.id));
+        if (!anchors.length) continue;
+        const a = anchors[Math.floor(rng() * anchors.length)], g = gameOf(a);
+        const opts = poolPlayers.filter(q => !inLineup.has(q.id) && q.position === p.position && gameOf(q) === g && Math.abs(q.salary - p.salary) <= 1500 && q.proj >= 0.5 * p.proj);
+        if (!opts.length) continue;
+        const next = arr.slice(); next[i] = opts[Math.floor(rng() * opts.length)];
+        if (simBuildValid(next, false, ctx)) out.push(next);
+      }
+    }
     if (wide) {
       // two-slot swaps: replace two players at once with random same-position options within ~$1,200 of each original
       for (let k = 0; k < 12; k++) {
@@ -5988,6 +6006,12 @@ if (typeof window !== "undefined") {
       } else {
         const gcommon = { ...baseGen, flexEligible, vegasContext: state.vegasContext, maxMainTeam: genMain, maxOtherTeam: genOther, secondaryStackSize: 0, tertiaryStackSize: 0 };
         eng.generateCorrelatedLineups(pool, 150, { ...gcommon, poolAttempts: 4000, seed: 31 + pp * 1000, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
+        // in-game correlation outside the main stack: a second game with players from both sides (2- and 3-man game stacks)
+        const stk = { bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) };
+        const g2 = { ...gcommon, ...stk };
+        [[150, 2, 0, 3500, 51], [100, 3, 0, 3500, 52], [120, 2, 1.0, 3500, 53], [60, 3, 1.0, 3500, 54]].forEach(([cnt, sec, ow, att, sd]) => {
+          try { eng.generateCorrelatedLineups(pool, cnt, { ...g2, secondaryStackSize: sec, ...(ow ? { ownershipWeight: ow } : {}), poolAttempts: att, seed: sd + pp * 1000 }).forEach(r => addCand(r.arr, "game")); } catch (e) { /* skip */ }
+        });
         // heavier ownership fade than the sidebar slider (true leverage builds)
         eng.generateCorrelatedLineups(pool, 150, { ...gcommon, ownershipWeight: 1.0, poolAttempts: 3500, seed: 77 + pp * 1000, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: Math.min(3, ctx.maxStack) }).forEach(r => addCand(r.arr));
         // chalk-exclusion recipe: build with each 20%+ owned player removed, one at a time, so no-chalk lineups get scored too
@@ -6000,6 +6024,7 @@ if (typeof window !== "undefined") {
         teams.forEach((t, ti) => {
           for (const size of [2, 3].filter(z => z <= ctx.maxStack)) for (const bb of [0, 1]) {
             try { eng.generateCorrelatedLineups(pool, 3, { ...gcommon, poolAttempts: 500, seed: 40 + ti + pp * 1000, bringBackShare: bb, stackTeams: [t], stackSize: size }).forEach(r => addCand(r.arr)); } catch (e) { /* skip */ }
+            try { eng.generateCorrelatedLineups(pool, 3, { ...gcommon, secondaryStackSize: 2, poolAttempts: 500, seed: 140 + ti + pp * 1000, bringBackShare: bb, stackTeams: [t], stackSize: size }).forEach(r => addCand(r.arr, "game")); } catch (e) { /* skip */ }
           }
         });
       }
@@ -6022,7 +6047,7 @@ if (typeof window !== "undefined") {
           try {
             const seed = 5000 + bi * 13 + Math.floor(rr() * 1000);
             if (isShowdown) eng.generateShowdownCorrelated(sub, 10, { ...baseGen, boosts: bm, ownershipWeight: 0.3, poolAttempts: 700, seed, structure: { configs: [{ count: 3 + (bi % 3), team: null }] } }).forEach(r => addCand(r.arr, "random"));
-            else eng.generateCorrelatedLineups(sub, 10, { ...gcommonW(), boosts: bm, ownershipWeight: 0.3, poolAttempts: 700, seed, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: 2 + (bi % 2) }).forEach(r => addCand(r.arr, "random"));
+            else eng.generateCorrelatedLineups(sub, 10, { ...gcommonW(), boosts: bm, ownershipWeight: 0.3, poolAttempts: 700, seed, bringBackShare: 0.5, stackTeams: ctx.allowedTeams ? [...ctx.allowedTeams] : [], stackSize: 2 + (bi % 2), secondaryStackSize: bi % 2 ? 2 : 0 }).forEach(r => addCand(r.arr, "random"));
           } catch (e) { /* skip */ }
         }
         if (!isShowdown) {
@@ -6999,7 +7024,7 @@ if (typeof window !== "undefined") {
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);
     stats.hidden = false;
     stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg top 1%", pctFmt(B.oosTop1)], ["Avg win", pctFmt(B.oosWin)], ["Avg ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
-    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
+    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps", game: "game stacks" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
       <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
     if (B.res && B.fieldAvg) {
       const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));

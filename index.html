@@ -4246,6 +4246,31 @@ if (typeof window !== "undefined") {
 401st - 750th	$300.00
 751st - 3350th	$225.00`,
     },
+    {
+      id: "preset_screenpass_15",
+      label: "$40K Screen Pass [3 Entry Max] ($15)",
+      totalEntries: 3137,
+      entryFee: 15,
+      rawText: "This 3137-player contest features $40,000.00 in total prizes and pays out the top 715 finishing positions. First place wins $4,000.00. Max 3 entries per user.",
+      payoutRawText: `1st	$4,000.00
+2nd	$2,000.00
+3rd	$1,500.00
+4th	$1,000.00
+5th	$750.00
+6th	$600.00
+7th - 8th	$500.00
+9th - 10th	$400.00
+11th - 12th	$300.00
+13th - 14th	$250.00
+15th - 19th	$200.00
+20th - 24th	$150.00
+25th - 34th	$100.00
+35th - 50th	$75.00
+51st - 80th	$60.00
+81st - 145th	$50.00
+146th - 260th	$40.00
+261st - 715th	$30.00`,
+    },
   ];
 
   function makeSeededContestPresets() {
@@ -6711,7 +6736,7 @@ if (typeof window !== "undefined") {
   const ownSum = (arr) => arr.reduce((a, p) => a + (p.ownLarge != null && !isNaN(p.ownLarge) ? p.ownLarge : (p.own || 0)), 0);
 
   /* ---- contests ---- */
-  const SHORT = { preset_large_single: "L·SE", preset_large_5max: "L·5max", preset_small_single: "S·SE", preset_mm_150: "MM·$150" };
+  const SHORT = { preset_large_single: "L·SE", preset_large_5max: "L·5max", preset_small_single: "S·SE", preset_mm_150: "MM·$150", preset_screenpass_15: "SP·$15" };
   const shortOf = (c) => SHORT[c.id] || (c.label.length > 11 ? c.label.slice(0, 10) + "…" : c.label);
   function autoPayoutTable(entries, fee, { rake = 0.15, paidFrac = 0.22, minMult = 1.8, decay = 1.12 } = {}) {
     if (!entries || !fee) return null;

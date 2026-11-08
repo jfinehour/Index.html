@@ -1106,12 +1106,12 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
           <div class="slider-group" id="secondaryStackGroup">
             <div class="slider-label"><b>Secondary game stack</b><span class="val" id="valSecondaryStack">Off</span></div>
             <input type="range" id="sliderSecondaryStack" min="0" max="2" value="0" step="1">
-            <div class="slider-note">A second game stack with at least one player from each team in that game.</div>
+            <div class="slider-note">Prefers a second game stack with at least one player from each team in that game. It is considered, not required: some lineups will not have one.</div>
           </div>
           <div class="slider-group" id="tertiaryStackGroup">
             <div class="slider-label"><b>Tertiary game stack</b><span class="val" id="valTertiaryStack">Off</span></div>
             <input type="range" id="sliderTertiaryStack" min="0" max="2" value="0" step="1">
-            <div class="slider-note">A third game stack. Requires Secondary to be on first.</div>
+            <div class="slider-note">Prefers a third game stack, considered rather than required. Needs Secondary on first.</div>
           </div>
           <div class="slider-group" id="maxPerTeamGroup">
             <div class="slider-label"><b>Max from main stack team</b><span class="val" id="valMaxMainTeam">Off</span></div>
@@ -2338,12 +2338,32 @@ function overlapCount(a, b) {
   return a.filter(p => idsB.has(p.id)).length;
 }
 
+/** Does the lineup contain the requested secondary / tertiary game stacks (players from BOTH teams of games other than the QB's)? */
+function extraStacksSatisfied(arr, secondary, tertiary) {
+  if (!(secondary > 0) && !(tertiary > 0)) return true;
+  const qb = arr.find(p => p.position === "QB");
+  const qbGame = qb ? [qb.team, oppTeam(qb)].sort().join("-") : null;
+  const games = new Map();
+  for (const p of arr) {
+    if (p.position === "QB" || p.position === "DST") continue;
+    const key = [p.team, oppTeam(p)].sort().join("-");
+    if (key === qbGame) continue;
+    if (!games.has(key)) games.set(key, new Map());
+    const m = games.get(key); m.set(p.team, (m.get(p.team) || 0) + 1);
+  }
+  const totals = [];
+  for (const m of games.values()) if (m.size >= 2) totals.push([...m.values()].reduce((a, b) => a + b, 0));
+  totals.sort((a, b) => b - a);
+  const needed = [secondary, tertiary].filter(n => n > 0).sort((a, b) => b - a);
+  return needed.every((nd, i) => totals[i] >= nd);
+}
+
 function generateCorrelatedLineups(players, n, opts = {}) {
   const { poolAttempts = 4000, seed = 42, ownershipWeight = 0.35, bringBackShare = 0.5,
           maxExposureFraction = 0.4, maxOverlap = 6, ownershipField = "own",
           flexEligible = FLEX_ELIGIBLE, stackTeams = null, stackSize = 1,
           vegasContext = null, salaryCap = SALARY_CAP, minSalary = 0, ceilingWeight = 1.0,
-          secondaryStackSize = 0, tertiaryStackSize = 0, boosts = null, maxMainTeam = 0, maxOtherTeam = 0, requireNames = null } = opts;
+          secondaryStackSize: secondaryIn = 0, tertiaryStackSize: tertiaryIn = 0, secondarySoft = false, boosts = null, maxMainTeam = 0, maxOtherTeam = 0, requireNames = null } = opts;
   const rng = mulberry32(seed);
   const reqNames = requireNames && requireNames.length ? requireNames : null;
   const maxExposure = Math.max(3, Math.ceil(n * maxExposureFraction));
@@ -2366,6 +2386,10 @@ function generateCorrelatedLineups(players, n, opts = {}) {
   const seenSigs = new Set();
   for (let i = 0; i < poolAttempts; i++) {
     const wantBringBack = rng() < bringBackShare;
+    // Soft mode: the extra game stacks are CONSIDERED, not forced. Half of the attempts try for them, half don't,
+    // and lineups that did land them get a small score bonus; the rest compete on the normal score.
+    const tryExtra = !secondarySoft || rng() < 0.5;
+    const secondaryStackSize = tryExtra ? secondaryIn : 0, tertiaryStackSize = tryExtra ? tertiaryIn : 0;
     const built = buildOneLineup(players, {
       scoreFn: leverageScore, rng, noise: 0.30, topK: 14, flexEligible, qbTeamFilter, stackSize, vegasContext, salaryCap, minSalary, maxMainTeam, maxOtherTeam,
       requireStack: true, requireBringBack: wantBringBack, secondaryStackSize, tertiaryStackSize,
@@ -2379,7 +2403,8 @@ function generateCorrelatedLineups(players, n, opts = {}) {
     const sig = signature(improved.arr);
     if (seenSigs.has(sig)) continue;
     seenSigs.add(sig);
-    const score = lineupScore(improved.arr, leverageScore);
+    let score = lineupScore(improved.arr, leverageScore);
+    if (secondarySoft && (secondaryIn > 0 || tertiaryIn > 0) && extraStacksSatisfied(improved.arr, secondaryIn, tertiaryIn)) score *= 1.005;
     candidates.push({ arr: improved.arr, bringBack: wantBringBack, score });
   }
 
@@ -5258,7 +5283,7 @@ if (typeof window !== "undefined") {
     state.results[type] = selectWithRules(genOver(gppPlayers, (bp, k) => eng.generateCorrelatedLineups(bp, n * M, {
       poolAttempts: 4000, seed: seedBase + k, ownershipField: ownField, flexEligible, salaryCap, minSalary, ceilingWeight, boosts: genBoosts, maxMainTeam, maxOtherTeam, requireNames: lockedNames(),
       ownershipWeight: ownW, bringBackShare: bbShare, maxExposureFraction: expFrac,
-      stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, vegasContext: state.vegasContext,
+      stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize, tertiaryStackSize, secondarySoft: true, vegasContext: state.vegasContext,
     }), r => r.arr, r => r.score, eng.signature), n, expFrac, r => r.arr);
     state.resultsMeta[type] = { ownershipField: ownField, ownershipFieldLabel: label, ownershipWeight: ownW, bringBackShare: bbShare, maxExposureFraction: expFrac, stackSize, secondaryStackSize, tertiaryStackSize, ceilingWeight, minProj, minSalary, salaryCap, boosts: state.playerBoosts, maxMainTeam, maxOtherTeam, showdown: false };
     return true;
@@ -5298,7 +5323,7 @@ if (typeof window !== "undefined") {
       poolAttempts: 2500, ownershipField: ownField, flexEligible, salaryCap, minSalary, ceilingWeight, boosts: ruleBoosts(), maxMainTeam, maxOtherTeam,
       requireNames: lockedNames(), ownershipWeight: ownW, bringBackShare: parseInt(els.sliderBringback.value, 10) / 100, maxExposureFraction: 0.7,
       stackTeams: [...state.selectedTeams], stackSize, secondaryStackSize: stackSizeFromSlider(parseInt(els.sliderSecondaryStack.value, 10)),
-      tertiaryStackSize: stackSizeFromSlider(parseInt(els.sliderTertiaryStack.value, 10)), vegasContext: state.vegasContext,
+      tertiaryStackSize: stackSizeFromSlider(parseInt(els.sliderTertiaryStack.value, 10)), secondarySoft: true, vegasContext: state.vegasContext,
     };
     const ctx = {
       salaryCap, minSalary, flexEligible, teamCount: new Set(pool.map(p => p.team)).size, maxMainTeam, maxOtherTeam,
@@ -5409,8 +5434,8 @@ if (typeof window !== "undefined") {
     ];
     if (!meta.showdown) {
       parts.push(`<b>Stack:</b> QB + ${meta.stackSize}`);
-      if (meta.secondaryStackSize > 0) parts.push(`<b>2nd game stack:</b> ${meta.secondaryStackSize} players, both teams`);
-      if (meta.tertiaryStackSize > 0) parts.push(`<b>3rd game stack:</b> ${meta.tertiaryStackSize} players, both teams`);
+      if (meta.secondaryStackSize > 0) parts.push(`<b>2nd game stack:</b> ${meta.secondaryStackSize} players, both teams (preferred, not required)`);
+      if (meta.tertiaryStackSize > 0) parts.push(`<b>3rd game stack:</b> ${meta.tertiaryStackSize} players, both teams (preferred, not required)`);
       parts.push(`<b>Bring-back rate:</b> ${Math.round(meta.bringBackShare * 100)}%`);
     } else {
       parts.push(`<b>Captain:</b> ×1.5 score &amp; salary`);

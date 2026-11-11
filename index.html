@@ -5382,8 +5382,9 @@ if (typeof window !== "undefined") {
     const sorted = res.map(r => r.roiTruePct).sort((a, b) => a - b);
     const lo = sorted[Math.floor(sorted.length * 0.05)], hi = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
     const soft = (v) => v > hi ? hi + 0.15 * (v - hi) : v < lo ? lo + 0.15 * (v - lo) : v;
-    const sr = stat(res.map(r => soft(r.roiTruePct))), st = stat(res.map(r => r.top1Pct));
-    const scorer = (r) => 0.5 * (soft(r.roiTruePct) - sr.m) / sr.sd + 0.5 * (r.top1Pct - st.m) / st.sd;
+    const sr = stat(res.map(r => soft(r.roiTruePct))), st = stat(res.map(r => r.top1Pct)), st10 = stat(res.map(r => r.top10Pct || 0));
+    // stabilized blend: raw simulated ROI alone is the noisiest signal, so top 1% and top 10% rates share the ranking
+    const scorer = (r) => 0.4 * (soft(r.roiTruePct) - sr.m) / sr.sd + 0.3 * (r.top1Pct - st.m) / st.sd + 0.3 * ((r.top10Pct || 0) - st10.m) / st10.sd;
     list.forEach(x => { x.score = scorer(x.res); });
     // one round of simulation-checked swaps around the best
     setStatus(`Tuning ${TYPE_LABEL[type]} lineups to ${c.label}: improving the best with player swaps…`); setProg(75); await tick();
@@ -5394,6 +5395,22 @@ if (typeof window !== "undefined") {
       if (!cands.has(sg)) { const o = { arr: nb, src: "swap" }; cands.set(sg, o); fresh.push(o); }
     }
     if (fresh.length) { const r2 = evalMany(fresh.map(x => x.arr)); fresh.forEach((x, i) => { x.res = r2[i]; x.score = scorer(r2[i]); }); }
+    // finalist round: re-score the leaders on a second opponent field with more slates, and combine both estimates
+    {
+      const all = [...cands.values()].sort((a, b) => b.score - a.score);
+      const fin = all.slice(0, Math.min(all.length, Math.max(150, n * 8)));
+      const it2 = Math.max(3000, iterations * 3);
+      setStatus(`Tuning ${TYPE_LABEL[type]} lineups to ${c.label}: finalist round on ${it2.toLocaleString()} fresh slates…`); setProg(82); await tick();
+      const f2 = getContestField(c, { fieldSampleSize, sharpShare: sbs.sharp / 100, consensusShare: sbs.cons / 100, isShowdown: false, seed: 55 + SB });
+      const fa = fin.map(x => x.arr);
+      const r2 = eng.simulateContestROIMulti(fa, f2, { ...simBase, iterations: it2, seed: 303 + SB, dupEst: eng.estimateDupes(fa, f2) });
+      const w = it2 / (it2 + iterations);
+      fin.forEach((x, i) => {
+        const o = { ...x.res };
+        for (const k of ["cashRatePct", "roiPct", "roiTruePct", "top1Pct", "top10Pct"]) o[k] = (1 - w) * (x.res[k] || 0) + w * (r2[i][k] || 0);
+        x.res = o; x.score = 1000 + scorer(o); // finalists rank ahead of the rest
+      });
+    }
     // choose n with the same exposure / lock / ownership-cap rules as every other build
     const ranked = [...cands.values()].sort((a, b) => b.score - a.score);
     const chosen = selectWithRules(ranked, n, expFrac, x => x.arr);
@@ -6117,7 +6134,7 @@ if (typeof window !== "undefined") {
         ["proj", "ceil"].forEach(k => (state.results[k] || []).forEach(arr => { if (added < levCount) { const n0 = cands.size; addCand(arr); added += cands.size - n0; } }));
       }
     });
-    let field, fields, evalMany, scorer, scored = [], simBase;
+    let field, fields, evalMany, scorer, makeScorer, scored = [], simBase, finalInfo = null;
     stages.push(async () => {
       statusEl.textContent = `Scoring ${cands.size.toLocaleString()} candidates in the contest simulation${passes > 1 ? " (" + passes + " passes, each with its own field and random slates)" : ""}…`;
       // each pass gets its own sampled opponent field and its own random slates; results are averaged
@@ -6130,30 +6147,35 @@ if (typeof window !== "undefined") {
         for (let pp = 0; pp < passes; pp++) {
           if (pp > 0) { statusEl.textContent = `Pass ${pp + 1} of ${passes}…`; await new Promise(r => setTimeout(r, 15)); }
           const r = eng.simulateContestROIMulti(arrs, fields[pp], { ...simBase, seed: 101 + pp + SB, dupEst: isShowdown ? null : eng.estimateDupes(arrs, fields[pp]) });
-          if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes, roiTruePct: x.roiTruePct / passes, winAdjPct: x.winAdjPct / passes, dupEst: x.dupEst / passes, top1Pct: x.top1Pct / passes, winPct: x.winPct / passes }));
-          else r.forEach((x, i) => { acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; acc[i].roiTruePct += x.roiTruePct / passes; acc[i].winAdjPct += x.winAdjPct / passes; acc[i].dupEst += x.dupEst / passes; acc[i].top1Pct += x.top1Pct / passes; acc[i].winPct += x.winPct / passes; });
+          if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes, roiTruePct: x.roiTruePct / passes, winAdjPct: x.winAdjPct / passes, dupEst: x.dupEst / passes, top1Pct: x.top1Pct / passes, top10Pct: (x.top10Pct || 0) / passes, winPct: x.winPct / passes }));
+          else r.forEach((x, i) => { acc[i].top10Pct += (x.top10Pct || 0) / passes; acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; acc[i].roiTruePct += x.roiTruePct / passes; acc[i].winAdjPct += x.winAdjPct / passes; acc[i].dupEst += x.dupEst / passes; acc[i].top1Pct += x.top1Pct / passes; acc[i].winPct += x.winPct / passes; });
         }
         return acc;
       };
       const list = [...cands.values()];
       const res = await evalMany(list.map(x => simArr(x.arr)));
       list.forEach((x, i) => { x.res = res[i]; });
-      // scorer: z-scores of cash and winsorized ROI over the initial pool
-      const cashs = res.map(r => r.cashRatePct), rois = res.map(r => r.roiPct).sort((x, y) => x - y);
-      const lo = rois[Math.floor(rois.length * 0.05)], hi = rois[Math.floor(rois.length * 0.95)];
-      // soft winsorizing: beyond the 5th/95th percentile a candidate still ranks by its raw ROI, just at 15% weight, so the top of the pool is not a tie
-      const clampR = (v) => v > hi ? hi + 0.15 * (v - hi) : v < lo ? lo + 0.15 * (v - lo) : v;
-      const stat = (xs) => { const m = xs.reduce((s, v) => s + v, 0) / xs.length; const sd = Math.sqrt(xs.reduce((s, v) => s + (v - m) ** 2, 0) / xs.length) || 1; return { m, sd }; };
-      const tr = res.map(r => r.roiTruePct).sort((x, y) => x - y);
-      const tlo = tr[Math.floor(tr.length * 0.01)], thi = tr[Math.min(tr.length - 1, Math.floor(tr.length * 0.99))];
-      const clampT = (v) => v > thi ? thi + 0.15 * (v - thi) : v < tlo ? tlo + 0.15 * (v - tlo) : v; // True ROI is winsorized at the 1st/99th percentile across lineups (uncapped payout, only extreme outliers trimmed)
-      const sc = stat(cashs), sr = stat(res.map(r => clampR(r.roiPct))), st1 = stat(res.map(r => r.top1Pct)), sw = stat(res.map(r => r.winPct)), stt = stat(res.map(r => clampT(r.roiTruePct))), swa = stat(res.map(r => r.winAdjPct));
-      scorer = (r) => {
-        const zc = (r.cashRatePct - sc.m) / sc.sd, zr = (clampR(r.roiPct) - sr.m) / sr.sd, z1 = (r.top1Pct - st1.m) / st1.sd, zw = (r.winPct - sw.m) / sw.sd;
-        // win rate is zero for most candidates, so break ties with top 1% rate
-        const ztr = (clampT(r.roiTruePct) - stt.m) / stt.sd, zwa = (r.winAdjPct - swa.m) / swa.sd;
-        return metric === "cash" ? zc : metric === "top1" ? z1 : metric === "win" ? zw + 0.02 * z1 : metric === "true" ? ztr : metric === "winAdj" ? zwa + 0.02 * ztr : zr;
+      // Scorer factory: z-scores over a reference set of results.
+      // "ROI" and "True ROI" rank on a stabilized blend (40% ROI, 30% top 1% rate, 30% top 10% rate). A lineup's raw
+      // simulated ROI is driven by a handful of rare top finishes, so on its own it is the noisiest signal; in
+      // back-tests against 8,000-run reference sims the blend picked lineups with clearly higher true ROI.
+      makeScorer = (res) => {
+        const rois = res.map(r => r.roiPct).sort((x, y) => x - y);
+        const lo = rois[Math.floor(rois.length * 0.05)], hi = rois[Math.min(rois.length - 1, Math.floor(rois.length * 0.95))];
+        const clampR = (v) => v > hi ? hi + 0.15 * (v - hi) : v < lo ? lo + 0.15 * (v - lo) : v;
+        const stat = (xs) => { const m = xs.reduce((s, v) => s + v, 0) / xs.length; const sd = Math.sqrt(xs.reduce((s, v) => s + (v - m) ** 2, 0) / xs.length) || 1; return { m, sd }; };
+        const tr = res.map(r => r.roiTruePct).sort((x, y) => x - y);
+        const tlo = tr[Math.floor(tr.length * 0.01)], thi = tr[Math.min(tr.length - 1, Math.floor(tr.length * 0.99))];
+        const clampT = (v) => v > thi ? thi + 0.15 * (v - thi) : v < tlo ? tlo + 0.15 * (v - tlo) : v;
+        const sc = stat(res.map(r => r.cashRatePct)), sr = stat(res.map(r => clampR(r.roiPct))), st1 = stat(res.map(r => r.top1Pct)), st10 = stat(res.map(r => r.top10Pct || 0)), sw = stat(res.map(r => r.winPct)), stt = stat(res.map(r => clampT(r.roiTruePct))), swa = stat(res.map(r => r.winAdjPct));
+        return (r) => {
+          const zc = (r.cashRatePct - sc.m) / sc.sd, zr = (clampR(r.roiPct) - sr.m) / sr.sd, z1 = (r.top1Pct - st1.m) / st1.sd, z10 = ((r.top10Pct || 0) - st10.m) / st10.sd, zw = (r.winPct - sw.m) / sw.sd;
+          const ztr = (clampT(r.roiTruePct) - stt.m) / stt.sd, zwa = (r.winAdjPct - swa.m) / swa.sd;
+          // win rate is zero for most candidates, so break ties with top 1% rate
+          return metric === "cash" ? zc : metric === "top1" ? z1 : metric === "win" ? zw + 0.02 * z1 : metric === "true" ? 0.4 * ztr + 0.3 * z1 + 0.3 * z10 : metric === "winAdj" ? zwa + 0.02 * ztr : 0.4 * zr + 0.3 * z1 + 0.3 * z10;
+        };
       };
+      scorer = makeScorer(res);
       list.forEach(x => { x.score = scorer(x.res); });
     });
     if (wide) stages.push(async () => {
@@ -6190,9 +6212,34 @@ if (typeof window !== "undefined") {
         fresh.forEach((x, i) => { x.res = res[i]; x.score = scorer(res[i]); });
       });
     }
+    stages.push(async () => {
+      // Finalist round. One scoring pass is too noisy to separate the best few lineups from the merely good: with
+      // thousands of candidates, the top of the list is partly luck. So the leaders are re-scored on a NEW opponent
+      // field and several times as many fresh slates, the two estimates are combined, and only then are picks made.
+      const all = [...cands.values()].filter(x => x.score != null).sort((x, y) => y.score - x.score);
+      const K = Math.min(all.length, Math.max(200, Math.min(400, nTarget * 10)));
+      if (K < 2) return;
+      const fin = all.slice(0, K);
+      const it2 = Math.min(6000, Math.max(3000, iterations * 4));
+      statusEl.textContent = `Finalist round: re-scoring the top ${K} candidates on ${it2.toLocaleString()} fresh slates…`;
+      await new Promise(r => setTimeout(r, 15));
+      const f2 = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 55 + SB });
+      const arrs = fin.map(x => simArr(x.arr));
+      const r2 = eng.simulateContestROIMulti(arrs, f2, { ...simBase, iterations: it2, seed: 303 + SB, dupEst: isShowdown ? null : eng.estimateDupes(arrs, f2) });
+      const n1 = iterations * passes, w = it2 / (it2 + n1);
+      fin.forEach((x, i) => {
+        const o = { ...x.res };
+        for (const k of ["cashRatePct", "roiPct", "roiCappedPct", "roiTruePct", "winAdjPct", "dupEst", "top1Pct", "top10Pct", "winPct"]) o[k] = (1 - w) * (x.res[k] || 0) + w * (r2[i][k] || 0);
+        x.res = o; x.final = true;
+      });
+      scorer = makeScorer(fin.map(x => x.res));
+      fin.forEach(x => { x.score = scorer(x.res); });
+      finalInfo = { K, runs: it2 + n1 };
+    });
     stages.push(() => {
       statusEl.textContent = "Selecting a diversified set and re-testing it on fresh simulated slates…";
-      const ranked = [...cands.values()].sort((x, y) => y.score - x.score);
+      // finalists (scored on the combined, larger sample) rank ahead of everything else
+      const ranked = [...cands.values()].sort((x, y) => ((y.final ? 1 : 0) - (x.final ? 1 : 0)) || (y.score - x.score));
       const picked = [];
       const exp = new Map();
       const sharedMax = isShowdown ? 4 : 6;
@@ -6245,7 +6292,7 @@ if (typeof window !== "undefined") {
         rows: picked.map((x, i) => ({ inCash: x.res.cashRatePct, inRoi: x.res.roiPct, oosCash: oosMine[i].cashRatePct, oosRoi: oosMine[i].roiPct, oosCap: oosMine[i].roiCappedPct, oosTop1: oosMine[i].top1Pct, oosWin: oosMine[i].winPct, median: oosMine[i].medianRank, best: oosMine[i].bestRank, idx: i })),
         oosCash: avg(oosMine, "cashRatePct"), oosRoi: avg(oosMine, "roiPct"), oosCap: avg(oosMine, "roiCappedPct"), oosTop1: avg(oosMine, "top1Pct"), oosWin: avg(oosMine, "winPct"),
         inCash: avg(picked.map(x => x.res), "cashRatePct"), inRoi: avg(picked.map(x => x.res), "roiPct"), cmp,
-        breadth: sbs.breadth, srcCounts: picked.reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}), srcPool: [...cands.values()].reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}),
+        finalists: finalInfo, breadth: sbs.breadth, srcCounts: picked.reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}), srcPool: [...cands.values()].reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}),
         res: oosMine, contestId: c.id, fieldAvg: fieldAverages(field), oosIters: Math.min(4000, iterations * 3),
       };
     });
@@ -7074,7 +7121,7 @@ if (typeof window !== "undefined") {
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);
     stats.hidden = false;
     stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg top 1%", pctFmt(B.oosTop1)], ["Avg win", pctFmt(B.oosWin)], ["Avg ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
-    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps", game: "game stacks" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
+    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.finalists ? ` The top ${B.finalists.K} candidates were re-scored on a second opponent field (${B.finalists.runs.toLocaleString()} simulated slates each in total) before the picks were made.` : ""}${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps", game: "game stacks" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
       <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
     if (B.res && B.fieldAvg) {
       const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));

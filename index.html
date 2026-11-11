@@ -6198,10 +6198,40 @@ if (typeof window !== "undefined") {
       const res = await evalMany(fresh.map(x => simArr(x.arr)));
       fresh.forEach((x, i) => { x.res = res[i]; x.score = scorer(res[i]); });
     });
+    // Re-testing in three steps (successive halving). One scoring pass cannot separate the best few lineups from
+    // the merely good: with thousands of candidates the top of the list is partly luck, and which lineups get lucky
+    // changes from run to run. So leaders are re-scored on independent opponent fields and fresh slates, and every
+    // lineup's numbers are the average of everything it has run. x.w = slates backing it, x.tier = re-tests survived.
+    const MERGE_KEYS = ["cashRatePct", "roiPct", "roiCappedPct", "roiTruePct", "winAdjPct", "dupEst", "top1Pct", "top10Pct", "winPct"];
+    const byRank = (x, y) => ((y.tier || 0) - (x.tier || 0)) || (y.score - x.score);
+    const mkCtx = (k, it) => {
+      const f = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 54 + k + SB });
+      return { f, it, seed: 302 + k + SB };
+    };
+    const refine = (xs, cx) => {
+      if (!xs.length) return;
+      const arrs = xs.map(x => simArr(x.arr));
+      const r2 = eng.simulateContestROIMulti(arrs, cx.f, { ...simBase, iterations: cx.it, seed: cx.seed, dupEst: isShowdown ? null : eng.estimateDupes(arrs, cx.f) });
+      xs.forEach((x, i) => {
+        const w0 = x.w || iterations * passes, o = { ...x.res };
+        for (const k of MERGE_KEYS) o[k] = ((x.res[k] || 0) * w0 + (r2[i][k] || 0) * cx.it) / (w0 + cx.it);
+        x.res = o; x.w = w0 + cx.it; x.tier = (x.tier || 0) + 1; x.score = scorer(o);
+      });
+    };
+    const scoredList = () => [...cands.values()].filter(x => x.score != null);
+    const F1 = Math.max(200, Math.min(600, nTarget * 10)), F2 = Math.max(60, Math.min(300, nTarget * 4));
+    let ctxB = null;
+    stages.push(async () => {
+      const top = scoredList().sort(byRank).slice(0, F1);
+      statusEl.textContent = `Re-test 1 of 2: the top ${top.length} candidates on a second opponent field and fresh slates…`;
+      await new Promise(r => setTimeout(r, 15));
+      ctxB = mkCtx(1, iterations);
+      refine(top, ctxB);
+    });
     for (let round = 1; round <= 2; round++) {
       stages.push(async () => {
-        statusEl.textContent = `Improving the best lineups with simulation-checked player swaps (round ${round}/2)…`;
-        const list = [...cands.values()].sort((x, y) => y.score - x.score).slice(0, wide ? 40 : 14);
+        statusEl.textContent = `Improving the confirmed leaders with simulation-checked player swaps (round ${round}/2)…`;
+        const list = scoredList().sort(byRank).slice(0, wide ? 40 : 14);
         const fresh = [];
         for (const x of list) for (const nb of simBuildNeighbors(x.arr, isShowdown, pool, ctx, rng, wide)) {
           const s = sigOf(nb);
@@ -6210,36 +6240,24 @@ if (typeof window !== "undefined") {
         if (!fresh.length) return;
         const res = await evalMany(fresh.map(x => simArr(x.arr)));
         fresh.forEach((x, i) => { x.res = res[i]; x.score = scorer(res[i]); });
+        // only swaps that look competitive on the first slates earn the second look
+        const fin1 = scoredList().filter(x => (x.tier || 0) >= 1).sort(byRank);
+        const bar = fin1.length ? fin1[Math.min(F2, fin1.length) - 1].score : -Infinity;
+        refine(fresh.filter(x => x.score >= bar), ctxB);
       });
     }
     stages.push(async () => {
-      // Finalist round. One scoring pass is too noisy to separate the best few lineups from the merely good: with
-      // thousands of candidates, the top of the list is partly luck. So the leaders are re-scored on a NEW opponent
-      // field and several times as many fresh slates, the two estimates are combined, and only then are picks made.
-      const all = [...cands.values()].filter(x => x.score != null).sort((x, y) => y.score - x.score);
-      const K = Math.min(all.length, Math.max(200, Math.min(400, nTarget * 10)));
-      if (K < 2) return;
-      const fin = all.slice(0, K);
-      const it2 = Math.min(6000, Math.max(3000, iterations * 4));
-      statusEl.textContent = `Finalist round: re-scoring the top ${K} candidates on ${it2.toLocaleString()} fresh slates…`;
+      const top = scoredList().filter(x => (x.tier || 0) >= 1).sort(byRank).slice(0, F2);
+      const itC = Math.min(6000, iterations * 3);
+      statusEl.textContent = `Re-test 2 of 2: the top ${top.length} on a third opponent field and ${itC.toLocaleString()} more slates…`;
       await new Promise(r => setTimeout(r, 15));
-      const f2 = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 55 + SB });
-      const arrs = fin.map(x => simArr(x.arr));
-      const r2 = eng.simulateContestROIMulti(arrs, f2, { ...simBase, iterations: it2, seed: 303 + SB, dupEst: isShowdown ? null : eng.estimateDupes(arrs, f2) });
-      const n1 = iterations * passes, w = it2 / (it2 + n1);
-      fin.forEach((x, i) => {
-        const o = { ...x.res };
-        for (const k of ["cashRatePct", "roiPct", "roiCappedPct", "roiTruePct", "winAdjPct", "dupEst", "top1Pct", "top10Pct", "winPct"]) o[k] = (1 - w) * (x.res[k] || 0) + w * (r2[i][k] || 0);
-        x.res = o; x.final = true;
-      });
-      scorer = makeScorer(fin.map(x => x.res));
-      fin.forEach(x => { x.score = scorer(x.res); });
-      finalInfo = { K, runs: it2 + n1 };
+      refine(top, mkCtx(2, itC));
+      finalInfo = { K: top.length, K1: Math.min(F1, scoredList().length), runs: iterations * passes + iterations + itC };
     });
     stages.push(() => {
       statusEl.textContent = "Selecting a diversified set and re-testing it on fresh simulated slates…";
-      // finalists (scored on the combined, larger sample) rank ahead of everything else
-      const ranked = [...cands.values()].sort((x, y) => ((y.final ? 1 : 0) - (x.final ? 1 : 0)) || (y.score - x.score));
+      // lineups that survived more re-tests (and so have more slates behind their numbers) rank ahead of the rest
+      const ranked = scoredList().sort(byRank);
       const picked = [];
       const exp = new Map();
       const sharedMax = isShowdown ? 4 : 6;
@@ -6278,7 +6296,10 @@ if (typeof window !== "undefined") {
       const oos = eng.simulateContestROIMulti(oosAll, oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 + SB, dupEst: isShowdown ? null : eng.estimateDupes(oosAll, oosField) });
       let oosMine = oos.slice(0, mine.length);
       const oosBase = oos.slice(mine.length);
-      const order = picked.map((_, i) => i).sort((i, j) => scorer(oosMine[j]) - scorer(oosMine[i]));
+      // order by everything known about each pick: its search re-tests plus this fresh check
+      const itO = Math.min(4000, iterations * 3);
+      const finalScore = picked.map((x, i) => { const w0 = x.w || iterations * passes, o = {}; for (const k of MERGE_KEYS) o[k] = ((x.res[k] || 0) * w0 + (oosMine[i][k] || 0) * itO) / (w0 + itO); return scorer(o); });
+      const order = picked.map((_, i) => i).sort((i, j) => finalScore[j] - finalScore[i]);
       picked.splice(0, picked.length, ...order.map(i => picked[i]));
       oosMine = order.map(i => oosMine[i]);
       const avg = (rs, k) => rs.length ? rs.reduce((s, r) => s + r[k], 0) / rs.length : null;
@@ -7121,7 +7142,7 @@ if (typeof window !== "undefined") {
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);
     stats.hidden = false;
     stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg top 1%", pctFmt(B.oosTop1)], ["Avg win", pctFmt(B.oosWin)], ["Avg ROI", sg(B.oosRoi) + "%"], ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
-    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.finalists ? ` The top ${B.finalists.K} candidates were re-scored on a second opponent field (${B.finalists.runs.toLocaleString()} simulated slates each in total) before the picks were made.` : ""}${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps", game: "game stacks" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
+    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.finalists ? ` Leaders were re-tested twice before the picks were made: the top ${B.finalists.K1 || B.finalists.K} on a second opponent field, then the top ${B.finalists.K} on a third (${B.finalists.runs.toLocaleString()} simulated slates each in total).` : ""}${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps", game: "game stacks" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
       <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td></tr>`).join("")}</tbody></table></div>`;
     if (B.res && B.fieldAvg) {
       const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));

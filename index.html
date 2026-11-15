@@ -933,6 +933,20 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
 }
 @media (max-width: 560px) { .brand h1 { font-size: 30px; } .brand .football-icon { width: 56px; } .hero-cards { grid-template-columns: 1fr; } .scroll { max-height: 520px; } }
 [hidden] { display: none !important; }
+
+/* Vegas lines: per-game rows (as in Swish) */
+.vlist { display: grid; gap: 8px; }
+.vrow { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--sunk); }
+.vrow .vt, .vrow .vi { grid-column: 1 / -1; font-size: 13px; }
+.vrow .vt small { color: var(--muted); font-weight: 400; }
+.vrow .vi { font-size: 12px; color: var(--muted); font-family: var(--f-data); }
+.vrow .vi b { color: var(--ink); font-weight: 500; }
+.vrow label { display: grid; gap: 3px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.vrow input { width: 100%; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-family: var(--f-data); font-size: 13px; color: var(--ink); text-align: right; }
+.vrow input:focus { border-color: var(--accent); outline: none; }
+.vmsg.ok { color: var(--turf); }
+.vmsg.err { color: var(--rust); }
+.vpaste summary { font-size: 12px; color: var(--muted); cursor: pointer; }
 </style>
 </head>
 <body>
@@ -1156,16 +1170,18 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
     </section>
 
     <section class="panel" aria-label="Vegas lines" id="vegasGroup">
-      <div class="panel-h"><h2>Vegas lines</h2><span class="meta" id="vegasStatus">Not loaded</span></div>
+      <div class="panel-h"><h2>Vegas lines</h2><span class="meta" id="vegasStatus">The Odds API</span></div>
       <div class="form">
-        <div class="field"><label for="oddsApiKey">API key (the-odds-api.com)</label>
-          <input type="password" id="oddsApiKey" class="txt" autocomplete="off" placeholder="Optional. Stays on this device">
-          <button type="button" class="btn" id="vegasFetchLiveBtn" style="justify-content:center">Fetch live lines</button></div>
-        <div class="field"><label for="vegasText">Or paste lines</label>
-          <textarea id="vegasText" class="pay" placeholder="DET,-7,49.5&#10;NO,7,49.5&#10;(Team,Spread,Total) or the API's raw JSON" rows="4"></textarea>
-          <div class="two"><button type="button" class="btn" id="vegasPrefillBtn" style="justify-content:center">Prefill teams</button><button type="button" class="btn primary" id="vegasLoadBtn" style="justify-content:center">Load lines</button></div>
-          <button type="button" class="btn" id="vegasClearBtn" style="justify-content:center">Clear</button>
-          <span class="hint">Lines drive bring-back logic, game-script scenarios in Showdown, and how much each game swings together in the simulation.</span></div>
+        <div class="field"><label for="oddsApiKey">API key</label>
+          <input type="password" id="oddsApiKey" class="txt" autocomplete="off" placeholder="Paste your key">
+          <button type="button" class="btn primary" id="vegasFetchLiveBtn" style="justify-content:center">Pull lines</button>
+          <span class="hint vmsg" id="oddsMsg">Each pull uses 2 credits (spreads + totals). Your key stays on this device.</span></div>
+        <div id="vegasGames"></div>
+        <details class="vpaste"><summary>Can't pull? Paste the API's JSON instead</summary>
+          <div class="field" style="margin-top:8px"><textarea id="vegasText" class="pay" placeholder="Paste the raw JSON from the-odds-api.com here" rows="3" aria-label="Odds API JSON"></textarea>
+            <button type="button" class="btn" id="vegasLoadBtn" style="justify-content:center">Load pasted lines</button></div></details>
+        <button type="button" class="btn" id="vegasClearBtn" style="justify-content:center">Clear lines</button>
+        <span class="hint">Lines drive bring-back logic, game-script scenarios in Showdown, and how much each game swings together in the simulation.</span>
       </div>
     </section>
   </aside>
@@ -4928,9 +4944,10 @@ if (typeof window !== "undefined") {
     state.buildInfo = null;
     state.selectedTeams = new Set();
     state.playerBoosts.clear();
-    state.vegasContext = null;
+    state.vegas = {}; state.vegasContext = null;
+    state._vegasSig = null;
     renderShowdownScriptControls();
-    safeStorageRemove(STORAGE_KEY_VEGAS);
+    safeStorageRemove(STORAGE_KEY_VEGAS); safeStorageRemove("gridlock_vegas_games");
 
     els.fileStatus.textContent = "No projections active yet";
     els.fileStatus.className = "file-status";
@@ -4942,8 +4959,7 @@ if (typeof window !== "undefined") {
     els.pasteToggle.textContent = "Trouble picking a file? Paste CSV text instead ▾";
 
     els.vegasText.value = "";
-    els.vegasStatus.textContent = "Not loaded";
-    els.vegasStatus.className = "vegas-status";
+    document.getElementById("vegasGames").innerHTML = ""; els.vegasStatus.textContent = "The Odds API";
 
     els.teamChipGrid.innerHTML = "";
     els.teamPickerGroup.style.display = "none";
@@ -4958,107 +4974,146 @@ if (typeof window !== "undefined") {
     render();
   });
 
+  /* ---------------- Vegas lines (per-game rows, pulled from The Odds API or typed in) ---------------- */
+  // state.vegas: { [pairKey]: { home, away, total, homeSpread, books, src: "api" | "manual", at, tip } }, team codes canonical.
+  const STORAGE_KEY_VEGAS_GAMES = "gridlock_vegas_games";
+  const STORAGE_KEY_ODDS_API_KEY = "gridlock_odds_api_key";
+  const TEAM_ALIAS = { LA: "LAR", JAC: "JAX", WSH: "WAS", LVR: "LV", OAK: "LV", GNB: "GB", KAN: "KC", NWE: "NE", NOR: "NO", SFO: "SF", TAM: "TB", HST: "HOU", BLT: "BAL", CLV: "CLE", ARZ: "ARI", SD: "LAC", STL: "LAR" };
+  const canonTeam = (t) => { const u = String(t || "").trim().toUpperCase(); return TEAM_ALIAS[u] || u; };
+  const pairKey = (a, b) => [canonTeam(a), canonTeam(b)].sort().join("-");
+  const median = (a) => { const v = a.slice().sort((x, y) => x - y), n = v.length; return n ? (n % 2 ? v[(n - 1) / 2] : (v[n / 2 - 1] + v[n / 2]) / 2) : null; };
+  function vegasSlateGames() {
+    const m = new Map();
+    for (const p of (state.players || [])) {
+      const opp = eng.oppTeam(p); if (!p.team || !opp) continue;
+      const k = pairKey(p.team, opp);
+      if (!m.has(k)) m.set(k, { key: k, teams: [p.team, opp].sort((x, y) => canonTeam(x) < canonTeam(y) ? -1 : 1) });
+    }
+    return [...m.values()].sort((x, y) => x.key < y.key ? -1 : 1);
+  }
+  function vegasForTeam(team, g) {
+    const v = (state.vegas || {})[g.key];
+    if (!v || v.total == null) return null;
+    const spread = v.homeSpread == null ? null : canonTeam(team) === v.home ? v.homeSpread : -v.homeSpread;
+    return { total: v.total, spread, implied: spread == null ? v.total / 2 : (v.total - spread) / 2 };
+  }
+  // Rebuilds the context the engine reads (implied team totals keyed by the slate's own team codes).
+  function rebuildVegasContext() {
+    const impliedTotal = new Map(); let sum = 0, n = 0;
+    for (const g of vegasSlateGames()) {
+      const a = vegasForTeam(g.teams[0], g), b = vegasForTeam(g.teams[1], g);
+      if (!a || !b) continue;
+      impliedTotal.set(g.teams[0], a.implied); impliedTotal.set(g.teams[1], b.implied); sum += a.total; n++;
+    }
+    const had = !!state.vegasContext;
+    state.vegasContext = n ? { impliedTotal, avgGameTotal: sum / n } : null;
+    if (had || n) state.fieldCache = null;
+    renderShowdownScriptControls();
+  }
+  function saveVegas() { safeStorageSet(STORAGE_KEY_VEGAS_GAMES, JSON.stringify(state.vegas || {})); }
+  function vegasMsg(t, kind) { const el = document.getElementById("oddsMsg"); el.textContent = t; el.className = "hint vmsg " + (kind || ""); }
+  // Takes the Odds API's event list and stores a consensus (median across books) line per game.
+  function ingestOddsEvents(events) {
+    if (!Array.isArray(events)) throw new Error("Unexpected format: expected the API's JSON list of games.");
+    state.vegas = state.vegas || {};
+    const now = Date.now(); let stored = 0, kept = 0;
+    const sorted = events.slice().sort((x, y) => new Date(y.commence_time || 0) - new Date(x.commence_time || 0)); // earliest game of a pair is written last and wins
+    for (const ev of sorted) {
+      if (!ev || !ev.home_team || !ev.away_team) continue;
+      const home = canonTeam(eng.nflTeamNameToAbbr(ev.home_team)), away = canonTeam(eng.nflTeamNameToAbbr(ev.away_team)), k = pairKey(home, away);
+      const totals = [], spreads = [];
+      for (const bk of ev.bookmakers || []) for (const mk of bk.markets || []) {
+        if (mk.key === "totals") { const o = (mk.outcomes || []).find(o => o.name === "Over") || (mk.outcomes || [])[0]; if (o && typeof o.point === "number") totals.push(o.point); }
+        if (mk.key === "spreads") { const o = (mk.outcomes || []).find(o => o.name === ev.home_team); if (o && typeof o.point === "number") spreads.push(o.point); }
+      }
+      if (!totals.length && !spreads.length) continue;
+      // After kickoff the books post live in-game lines. Keep the pre-game line if there is one.
+      const tip = ev.commence_time ? Date.parse(ev.commence_time) : null, prev = state.vegas[k];
+      if (tip && tip <= now && prev && (prev.src === "manual" || (prev.at && prev.at < tip))) { kept++; continue; }
+      state.vegas[k] = { home, away, total: median(totals), homeSpread: median(spreads), books: (ev.bookmakers || []).length, src: "api", at: now, tip };
+      stored++;
+    }
+    return { stored, kept };
+  }
+  function vegasMatchSummary() {
+    const games = vegasSlateGames();
+    return { games: games.length, matched: games.filter(g => { const v = (state.vegas || {})[g.key]; return v && v.total != null; }).length };
+  }
+  function renderVegasGames() {
+    const box = document.getElementById("vegasGames"); if (!box) return;
+    const games = vegasSlateGames();
+    const { matched } = vegasMatchSummary();
+    els.vegasStatus.textContent = games.length ? `${matched} of ${games.length} games` : "The Odds API";
+    if (!games.length) { box.innerHTML = '<span class="hint">Load a slate to see its games.</span>'; return; }
+    const f1 = (x) => x.toFixed(1);
+    box.innerHTML = '<div class="vlist">' + games.map(g => {
+      const v = (state.vegas || {})[g.key], [a, b] = g.teams;
+      const sideA = v && v.homeSpread != null ? (canonTeam(a) === v.home ? v.homeSpread : -v.homeSpread) : "";
+      const ia = vegasForTeam(a, g), ib = vegasForTeam(b, g);
+      const homeLbl = v && v.home && !v.noHome ? (canonTeam(a) === v.home ? a : b) : "";
+      return `<div class="vrow" data-vk="${escapeHtml(g.key)}" data-a="${escapeHtml(a)}" data-b="${escapeHtml(b)}">
+        <div class="vt"><b>${escapeHtml(a)}</b> v <b>${escapeHtml(b)}</b>${homeLbl ? ` <small>at ${escapeHtml(homeLbl)}</small>` : ""}${v && v.src === "manual" ? " <small>· edited</small>" : v && v.at ? ` <small>· pulled ${new Date(v.at).toLocaleDateString([], { month: "short", day: "numeric" })}</small>` : ""}</div>
+        <label>Total<input data-vf="total" type="number" step="0.5" inputmode="decimal" value="${v && v.total != null ? v.total : ""}" placeholder="–" aria-label="Total for ${escapeHtml(a)} v ${escapeHtml(b)}"></label>
+        <label title="${escapeHtml(a)} spread">${escapeHtml(a)} ±<input data-vf="spread" type="number" step="0.5" inputmode="decimal" value="${sideA}" placeholder="–" aria-label="${escapeHtml(a)} spread"></label>
+        <div class="vi">${ia && ib ? `Implied: ${escapeHtml(a)} <b>${f1(ia.implied)}</b> · ${escapeHtml(b)} <b>${f1(ib.implied)}</b>` : "No line yet"}</div></div>`;
+    }).join("") + '</div><span class="hint">Spread (±) is from the first team\'s side; the favorite is negative. Edit any number to override.</span>';
+  }
+  function vegasChanged() { rebuildVegasContext(); saveVegas(); renderVegasGames(); }
+  function pullSummary(r, left) {
+    const { games, matched } = vegasMatchSummary();
+    if (!games) return { t: `Pulled lines for ${r.stored} games. Load a slate and they will be matched to it.${left != null ? ` ${left} API credits left.` : ""}`, ok: r.stored > 0 };
+    return { t: `Matched ${matched} of ${games} games (consensus of US sportsbooks).${r.kept ? ` ${r.kept} already kicked off, so their pre-game lines were kept.` : ""}${left != null ? ` ${left} API credits left.` : ""}${matched < games ? " Lines may not be posted yet for the rest; you can type them in." : ""}`, ok: matched > 0 };
+  }
+
+  document.getElementById("vegasGames").addEventListener("change", (e) => {
+    const i = e.target.closest("input[data-vf]"); if (!i) return;
+    const row = i.closest(".vrow"), k = row.dataset.vk, a = row.dataset.a, b = row.dataset.b;
+    state.vegas = state.vegas || {};
+    const v = state.vegas[k] || { home: canonTeam(a), away: canonTeam(b), total: null, homeSpread: null, noHome: true };
+    const x = i.value === "" || isNaN(+i.value) ? null : +i.value;
+    if (i.dataset.vf === "total") v.total = x; else v.homeSpread = x == null ? null : (canonTeam(a) === v.home ? x : -x);
+    v.src = "manual";
+    if (v.total == null && v.homeSpread == null) delete state.vegas[k]; else state.vegas[k] = v;
+    vegasChanged();
+  });
+
   els.vegasLoadBtn.addEventListener("click", () => {
-    const text = els.vegasText.value;
-    if (!text.trim()) {
-      els.vegasStatus.textContent = "Paste box is empty.";
-      els.vegasStatus.className = "vegas-status err";
-      return;
-    }
+    const text = els.vegasText.value.trim();
+    if (!text) return vegasMsg("The paste box is empty.", "err");
     try {
-      // Auto-detect format: the-odds-api.com JSON (starts with '[') vs. our
-      // plain Team,Spread,Total CSV rows.
-      const trimmed = text.trim();
-      const ctx = trimmed.startsWith("[")
-        ? eng.parseOddsApiResponse(trimmed)
-        : eng.parseVegasLines(text);
-      state.vegasContext = ctx;
-      renderShowdownScriptControls();
-      els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded`;
-      els.vegasStatus.className = "vegas-status ok";
-      safeStorageSet(STORAGE_KEY_VEGAS, text);
-    } catch (err) {
-      els.vegasStatus.textContent = "Error: " + err.message;
-      els.vegasStatus.className = "vegas-status err";
-    }
+      const r = ingestOddsEvents(JSON.parse(text));
+      vegasChanged();
+      const m = pullSummary(r, null); vegasMsg(m.t, m.ok ? "ok" : "err");
+    } catch (err) { vegasMsg("Couldn't read that as the API's JSON: " + err.message, "err"); }
   });
 
   els.vegasClearBtn.addEventListener("click", () => {
-    state.vegasContext = null;
-    renderShowdownScriptControls();
-    els.vegasText.value = "";
-    els.vegasStatus.textContent = "Not loaded";
-    els.vegasStatus.className = "vegas-status";
-    safeStorageRemove(STORAGE_KEY_VEGAS);
+    state.vegas = {}; els.vegasText.value = "";
+    vegasChanged();
+    vegasMsg("Lines cleared.");
   });
 
-  const STORAGE_KEY_ODDS_API_KEY = "gridlock_odds_api_key";
-  try {
-    const savedKey = localStorage.getItem(STORAGE_KEY_ODDS_API_KEY);
-    if (savedKey) els.oddsApiKey.value = savedKey;
-  } catch (e) { /* ignore */ }
+  try { const savedKey = localStorage.getItem(STORAGE_KEY_ODDS_API_KEY); if (savedKey) els.oddsApiKey.value = savedKey; } catch (e) { /* ignore */ }
 
   els.vegasFetchLiveBtn.addEventListener("click", async () => {
     const key = els.oddsApiKey.value.trim();
-    if (!key) {
-      els.vegasStatus.textContent = "Enter your the-odds-api.com API key first.";
-      els.vegasStatus.className = "vegas-status err";
-      return;
-    }
+    if (!key) return vegasMsg("Enter your Odds API key first. You can get a free key at the-odds-api.com.", "err");
     try { localStorage.setItem(STORAGE_KEY_ODDS_API_KEY, key); } catch (e) { /* ignore */ }
-
-    els.vegasFetchLiveBtn.disabled = true;
-    els.vegasFetchLiveBtn.textContent = "Fetching...";
-    els.vegasStatus.textContent = "Fetching live lines...";
-    els.vegasStatus.className = "vegas-status";
-
-    const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/?apiKey=${encodeURIComponent(key)}&regions=us&markets=spreads,totals&oddsFormat=american`;
+    els.vegasFetchLiveBtn.disabled = true; vegasMsg("Pulling lines…");
     try {
-      let resp;
-      try { resp = await fetch(url, { cache: "no-store" }); }
-      catch (netErr) { const e = new Error("The request never reached the-odds-api.com (the browser reported \"" + (netErr && netErr.message || "network error") + "\"). The API does allow browser requests, so the usual causes are an ad / tracker / content blocker or private-relay setting blocking api.the-odds-api.com, a VPN or network filter, or being offline. Try another browser or turn the blocker off for this page, or paste the JSON below."); e.netFail = true; throw e; }
-      if (!resp.ok) {
-        const bodyText = await resp.text().catch(() => "");
-        const hint = resp.status === 401 ? " Check the API key (copy it again from the-odds-api.com)." : resp.status === 429 ? " The key's request quota is used up for now." : resp.status === 422 ? " The API rejected the request." : "";
-        throw new Error(`API returned ${resp.status}.${hint} ${bodyText.slice(0, 150)}`);
+      const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds?apiKey=${encodeURIComponent(key)}&regions=us&markets=spreads,totals&oddsFormat=american`;
+      const res = await fetch(url, { cache: "no-store" });
+      const left = res.headers.get("x-requests-remaining");
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        return vegasMsg(res.status === 401 ? "The API key was rejected. Check it on your Odds API account page." : res.status === 429 ? "Your Odds API quota or rate limit is used up for now." : `The Odds API returned an error (${res.status}). ${body.slice(0, 140)}`, "err");
       }
-      const json = await resp.json();
-      const ctx = eng.parseOddsApiResponse(json);
-      state.vegasContext = ctx;
-      renderShowdownScriptControls();
-      els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded (live)`;
-      els.vegasStatus.className = "vegas-status ok";
-      els.vegasText.value = JSON.stringify(json);
-      safeStorageSet(STORAGE_KEY_VEGAS, JSON.stringify(json));
-    } catch (err) {
-      els.vegasStatus.textContent = (err.netFail ? "Live fetch failed. " : "Live fetch failed: ") + err.message + (err.netFail ? "" : " You can also paste the JSON below.");
-      els.vegasStatus.className = "vegas-status err";
-    } finally {
-      els.vegasFetchLiveBtn.disabled = false;
-      els.vegasFetchLiveBtn.textContent = "Fetch Live Lines";
-    }
-  });
-
-  els.vegasPrefillBtn.addEventListener("click", () => {
-    if (!state.players) {
-      els.vegasStatus.textContent = "Load a projections CSV first.";
-      els.vegasStatus.className = "vegas-status err";
-      return;
-    }
-    const teamOpp = new Map();
-    state.players.forEach(p => { if (!teamOpp.has(p.team)) teamOpp.set(p.team, eng.oppTeam(p)); });
-    const seenGames = new Set();
-    const lines = [];
-    for (const [team, opp] of teamOpp.entries()) {
-      const key = [team, opp].sort().join("-");
-      if (seenGames.has(key)) continue;
-      seenGames.add(key);
-      lines.push(`${team},,`);
-      lines.push(`${opp},,`);
-    }
-    els.vegasText.value = lines.join("\n");
-    els.vegasStatus.textContent = `${lines.length} team rows ready — fill in spread & total`;
-    els.vegasStatus.className = "vegas-status";
+      const r = ingestOddsEvents(await res.json());
+      vegasChanged();
+      const m = pullSummary(r, left); vegasMsg(m.t, m.ok ? "ok" : "err");
+    } catch (e) {
+      vegasMsg("Couldn't reach The Odds API. Check your connection (an ad or tracker blocker can also stop it) and try again, or type the lines in below.", "err");
+    } finally { els.vegasFetchLiveBtn.disabled = false; }
   });
 
   function populateTeamChips(players) {
@@ -6766,6 +6821,7 @@ if (typeof window !== "undefined") {
   function render() {
     renderHeader();
     if (!state.players) return;
+    { const sg = vegasSlateGames().map(g => g.key).join("|"); if (sg !== state._vegasSig) { state._vegasSig = sg; rebuildVegasContext(); renderVegasGames(); } }
     $("optView").hidden = state.view !== "opt";
     $("lineView").hidden = state.view !== "lines";
     $("simView").hidden = state.view !== "sim";
@@ -7281,20 +7337,14 @@ if (typeof window !== "undefined") {
       recomputeActivePool();
     }
 
-    const savedVegas = safeStorageGet(STORAGE_KEY_VEGAS);
-    if (savedVegas) {
-      try {
-        const trimmed = savedVegas.trim();
-        const ctx = trimmed.startsWith("[") ? eng.parseOddsApiResponse(trimmed) : eng.parseVegasLines(savedVegas);
-        state.vegasContext = ctx;
-        renderShowdownScriptControls();
-        els.vegasText.value = savedVegas;
-        els.vegasStatus.textContent = `${ctx.impliedTotal.size} teams loaded (restored)`;
-        els.vegasStatus.className = "vegas-status ok";
-      } catch (e) {
-        safeStorageRemove(STORAGE_KEY_VEGAS);
-      }
-    }
+    // Vegas lines: per-game store; a line set saved by the older paste box (the API's JSON) is carried over once.
+    try {
+      const g = safeStorageGet(STORAGE_KEY_VEGAS_GAMES);
+      if (g) state.vegas = JSON.parse(g) || {};
+      else { const old = safeStorageGet(STORAGE_KEY_VEGAS); if (old && old.trim().startsWith("[")) { state.vegas = {}; ingestOddsEvents(JSON.parse(old)); Object.values(state.vegas).forEach(v => { v.at = 0; }); saveVegas(); } }
+    } catch (e) { state.vegas = {}; }
+    safeStorageRemove(STORAGE_KEY_VEGAS);
+    rebuildVegasContext(); renderVegasGames();
   })();
 
   render();

@@ -1240,9 +1240,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
       <div class="form">
         <div class="field"><label for="simIters">Iterations</label>
           <select id="simIters" class="sel"><option value="500">500 (fast)</option><option value="1000" selected>1,000</option><option value="2500">2,500</option><option value="5000">5,000 (slow)</option></select></div>
-        <div class="field"><label for="dupMult">Field duplication</label>
-          <select id="dupMult" class="sel"><option value="1" selected>Model (1×)</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="3">3×</option></select>
-          <span class="hint">How many other entries are expected to hold your exact lineup. Duplicates split the prizes they tie for, so every ROI includes them. Raise this if you think the model understates duplication for a slate.</span></div>
+
         <div class="field"><span class="flabel">Contest</span>
           <div class="contests" id="contestList"></div>
           <button type="button" class="btn" id="addContestToggle">+ Add or edit a contest</button>
@@ -3471,7 +3469,7 @@ function buildSyntheticField(players, opts) {
     // How hard casual entrants push to spend the cap (see buildFieldArchetype / buildShowdownFieldArchetype).
     // Classic 100: ~42% of lineups at exactly $50,000 and ~2 in 3 within $100 (DraftKings Milly Maker fields).
     // Showdown 1000: about half of lineups above $49,500 (DraftKings flagship Showdown fields).
-    salaryTau = null,
+    salaryTau = null, vegasContext = null,
   } = opts;
   if (salaryTau == null) salaryTau = isShowdown ? 1000 : 100;
 
@@ -3655,8 +3653,9 @@ function buildSyntheticField(players, opts) {
     rawCounts, draws, accept: draws / Math.max(1, attempts), naiveEntryShare,
     sd: isShowdown ? { pool: players, salaryCap, salaryTau, herdShare, herdExp, weights: sdWeights } : null,
   };
+  const dupModel = getDupModel(players, { isShowdown, salaryCap, ownershipField, flexEligible, vegasContext });
   return {
-    archetypes, archetypeWeights, totalEntries, dupInfo,
+    archetypes, archetypeWeights, totalEntries, dupInfo, dupModel,
     info: { concentration, chalkScale, consensusShareEff: consensusShare, consensusCountEff: consensusCount, topRosterEntries: archetypeWeights[topIdx] || 0 },
   };
 }
@@ -3666,6 +3665,322 @@ function buildSyntheticField(players, opts) {
  * buildSyntheticField). Cheap relative to field construction — safe to
  * call once per lineup you want to check, reusing the same field object.
  */
+/* =====================================================================
+   Field lineup model for duplicate estimates.
+
+   One probability for every legal roster: how likely a single entrant is to
+   submit exactly that lineup. Expected duplicates of a lineup = (entries - 1)
+   x that probability. The model has the maximum-entropy form
+
+     P(lineup) = (1/Z) x prod(player weights) x exp(-salary left / tau) x stack terms
+
+   and its parameters are FITTED, not hand-set, so that the lineups it implies
+   reproduce:
+     - every player's projected ownership (captain and flex separately in
+       Showdown when the file has CPT ownership);
+     - how much of the cap the field spends. DraftKings data: in Milly Maker
+       fields 42% of lineups use the full $50,000 and another 22% use $49,900;
+       in flagship Showdown GPPs about half of lineups spend more than $49,500;
+     - how the field stacks. Classic: QB with at least one of his pass catchers
+       in 62% of lineups and an opposing bring-back in 19% (the same assumption
+       the opponent field uses), with the stack and bring-back pull of each game
+       scaled by its Vegas total. Showdown: 5-1 team splits in 12.5% of lineups
+       (field usage measured at 10-15%).
+   Z sums over every legal roster exactly (dynamic programming over salary), so
+   a lineup's probability is exact under the fitted model, not sampled.
+   ===================================================================== */
+const _dupModelCache = new WeakMap();
+const _logit = (p) => Math.log(Math.max(1e-6, p) / Math.max(1e-6, 1 - p));
+function _vegasSig(v) { if (!v || !v.impliedTotal) return ""; return [...v.impliedTotal.entries()].sort().map(([t, x]) => t + ":" + x.toFixed(2)).join(","); }
+function getDupModel(players, opts = {}) {
+  const key = [opts.isShowdown ? 1 : 0, opts.salaryCap || SALARY_CAP, opts.ownershipField || "ownLarge", [...(opts.flexEligible || FLEX_ELIGIBLE)].sort().join(""), _vegasSig(opts.vegasContext)].join("|");
+  let m = _dupModelCache.get(players);
+  if (!m) { m = new Map(); _dupModelCache.set(players, m); }
+  if (!m.has(key)) {
+    let model = null;
+    try { model = opts.isShowdown ? fitShowdownDupModel(players, opts) : fitClassicDupModel(players, opts); } catch (e) { model = null; }
+    m.set(key, model);
+  }
+  return m.get(key);
+}
+function _ownOf(p, f) { const o = p[f]; return o != null && !isNaN(o) ? Math.max(0, o) : 0; }
+// normalize a target vector to a given sum, keeping each share in (floor, cap)
+function _normTargets(t, sum, cap = 0.97, floor = 0.0004) {
+  let x = t.slice();
+  for (let it = 0; it < 20; it++) {
+    const s0 = x.reduce((a, b) => a + b, 0) || 1;
+    x = x.map(v => Math.min(cap, Math.max(floor, v * sum / s0)));
+  }
+  return x;
+}
+function _pickWeighted(idx, w, rng) { // idx: candidate indices, w: weight array
+  let tot = 0; for (const i of idx) tot += w[i];
+  let r = rng() * tot;
+  for (const i of idx) { r -= w[i]; if (r <= 0) return i; }
+  return idx[idx.length - 1];
+}
+
+// sample an index from unnormalized weights
+function _drawIdx(wts, rng) { let t = 0; for (let i = 0; i < wts.length; i++) t += wts[i]; let r = rng() * t; for (let i = 0; i < wts.length; i++) { r -= wts[i]; if (r <= 0 && wts[i] > 0) return i; } for (let i = wts.length - 1; i >= 0; i--) if (wts[i] > 0) return i; return -1; }
+// multinomial split of M draws over weights
+function _multinomial(M, wts, rng) { const out = new Int32Array(wts.length); for (let m = 0; m < M; m++) { const i = _drawIdx(wts, rng); if (i >= 0) out[i]++; } return out; }
+
+/* ---- Showdown: one captain + five FLEX ---- */
+function fitShowdownDupModel(players, opts = {}) {
+  const { salaryCap = 50000, ownershipField = "ownLarge", seed = 17, rounds = 14, draws = 12000, salaryTarget = 0.5, fiveOneTarget = 0.125 } = opts;
+  const P = players.filter(p => p.salary > 0 && isFinite(p.salary));
+  const n = P.length, teams = [...new Set(P.map(p => p.team))];
+  if (n < 7 || teams.length !== 2) return null;
+  const U = 100;
+  const fs = P.map(p => Math.round(p.salary / U)), cd = P.map(p => p.salary * 1.5); // FLEX salary units, captain dollars
+  const isA = P.map(p => (p.team === teams[0] ? 1 : 0));
+  const tot = P.map(p => _ownOf(p, ownershipField) / 100);
+  const hasCpt = P.some(p => p.cptOwn > 0);
+  const cT = _normTargets(P.map((p, i) => (hasCpt ? Math.max(0, (p.cptOwn || 0) / 100) : tot[i])), 1, 0.9);
+  const fT = _normTargets(P.map((p, i) => (hasCpt ? Math.max(0, tot[i] - (p.cptOwn || 0) / 100) : tot[i])), 5, 0.97);
+  const lc = cT.map(v => Math.log(v)), lf = fT.map(v => Math.log(v));
+  let tau = 1000, thC = 0;
+  const rng = mulberry32(seed);
+  const K = 6, A = 6;
+  // DP over the FLEX players for captain cc. keepTable: keep every prefix (for sampling)
+  const flexDP = (cc, keepTable) => {
+    const B = Math.floor((salaryCap - cd[cc]) / U); if (B < 0) return null;
+    const S = B + 1, L = [];
+    for (let j = 0; j < n; j++) if (j !== cc && fs[j] <= B) L.push(j);
+    const sz = K * A * S;
+    let D = new Float64Array(sz); D[0] = 1;
+    const tabs = keepTable ? [D.slice()] : null;
+    for (const j of L) {
+      const wj = Math.exp(lf[j]), sj = fs[j], aj = isA[j];
+      for (let k = 4; k >= 0; k--) for (let a = k; a >= 0; a--) {
+        const src = (k * A + a) * S, dst = ((k + 1) * A + a + aj) * S + sj;
+        for (let x = B - sj; x >= 0; x--) { const v = D[src + x]; if (v) D[dst + x] += wj * v; }
+      }
+      if (keepTable) tabs.push(D.slice());
+    }
+    // final weights over (a, x)
+    const fin = new Float64Array(A * S);
+    let z = 0;
+    for (let a = 0; a <= 5; a++) {
+      const na = isA[cc] + a; if (na < 1 || na > 5) continue;
+      const ff = Math.exp(thC * Math.abs(2 * na - 6));
+      for (let x = 0; x <= B; x++) {
+        const v = D[(5 * A + a) * S + x]; if (!v) continue;
+        const left = salaryCap - cd[cc] - x * U;
+        const f = v * ff * Math.exp(-left / tau);
+        fin[a * S + x] = f; z += f;
+      }
+    }
+    return { B, S, L, tabs, fin, z };
+  };
+  let fit = null, Zc = null;
+  for (let r = 0; r < rounds; r++) {
+    const last = r === rounds - 1;
+    Zc = new Float64Array(n);
+    for (let cc = 0; cc < n; cc++) { const d = flexDP(cc, false); if (d) Zc[cc] = Math.exp(lc[cc]) * d.z; }
+    const per = _multinomial(draws, Zc, rng);
+    const cCnt = new Float64Array(n), fCnt = new Float64Array(n);
+    let hi = 0, five = 0, tot0 = 0;
+    for (let cc = 0; cc < n; cc++) {
+      if (!per[cc]) continue;
+      const d = flexDP(cc, true);
+      for (let m = 0; m < per[cc]; m++) {
+        const cell = _drawIdx(d.fin, rng); if (cell < 0) continue;
+        let a = Math.floor(cell / d.S), x = cell % d.S, k = 5;
+        const na = isA[cc] + a;
+        const left = salaryCap - cd[cc] - x * U;
+        tot0++; cCnt[cc]++;
+        if (left < 500) hi++;
+        if (na === 1 || na === 5) five++;
+        for (let mm = d.L.length; mm >= 1 && k > 0; mm--) {
+          const j = d.L[mm - 1], sj = fs[j], aj = isA[j];
+          const cur = d.tabs[mm][(k * A + a) * d.S + x];
+          let take = 0;
+          if (a - aj >= 0 && x - sj >= 0) take = Math.exp(lf[j]) * d.tabs[mm - 1][((k - 1) * A + a - aj) * d.S + x - sj];
+          if (cur > 0 && rng() * cur < take) { fCnt[j]++; k--; a -= aj; x -= sj; }
+        }
+      }
+    }
+    let err = 0;
+    for (let i = 0; i < n; i++) {
+      const rc = cCnt[i] / tot0, rf = fCnt[i] / tot0;
+      err += Math.abs((rc + rf) - (cT[i] + fT[i]));
+      if (!last) {
+        const st = 0.9 / (1 + r / 5);
+        lc[i] += Math.max(-1, Math.min(1, st * Math.log((cT[i] + 1e-4) / (rc + 1e-4))));
+        lf[i] += Math.max(-1, Math.min(1, st * Math.log((fT[i] + 1e-4) / (rf + 1e-4))));
+      }
+    }
+    const pHi = hi / tot0, p51 = five / tot0;
+    fit = { ownErrPts: 100 * err / n, salaryShare: pHi, fiveOne: p51 };
+    if (opts.debugPlayers && last) opts.debugPlayers(P.map((p, i) => [p.name, p.salary, +(100 * cT[i]).toFixed(1), +(100 * cCnt[i] / tot0).toFixed(1), +(100 * fT[i]).toFixed(1), +(100 * fCnt[i] / tot0).toFixed(1)]));
+    if (opts.debug) opts.debug(r, fit, tau, thC);
+    if (last) break;
+    const eta = 0.6 / (1 + r / 3); // shrinking steps: the split and salary terms interact with the ownership fit
+    tau = Math.min(20000, Math.max(80, tau * Math.exp(eta * (_logit(pHi) - _logit(salaryTarget)))));
+    thC = Math.max(-3, Math.min(3, thC + eta * (_logit(fiveOneTarget) - _logit(p51))));
+  }
+  const Z = Zc.reduce((a, b) => a + b, 0), logZ = Math.log(Z);
+  const ix = new Map(P.map((p, i) => [p.id, i]));
+  return {
+    isShowdown: true,
+    info: { ...fit, tau, theta: thC, captainOwnership: hasCpt, players: n },
+    logProb(arr) {
+      const cp = arr.find(p => p.isCaptain), fl = arr.filter(p => !p.isCaptain);
+      if (!cp || fl.length !== 5) return -Infinity;
+      const cc = ix.get(cp.id), FF = fl.map(p => ix.get(p.id));
+      if (cc == null || FF.some(j => j == null)) return -Infinity;
+      const left = salaryCap - cd[cc] - FF.reduce((a, j) => a + P[j].salary, 0); if (left < 0) return -Infinity;
+      const na = isA[cc] + FF.reduce((a, j) => a + isA[j], 0); if (na < 1 || na > 5) return -Infinity;
+      return lc[cc] + FF.reduce((a, j) => a + lf[j], 0) - left / tau + thC * Math.abs(2 * na - 6) - logZ;
+    },
+  };
+}
+
+/* ---- Classic: QB, 2 RB, 3 WR, TE, FLEX, DST ---- */
+function fitClassicDupModel(players, opts = {}) {
+  const { salaryCap = SALARY_CAP, ownershipField = "ownLarge", flexEligible = FLEX_ELIGIBLE, vegasContext = null, seed = 19, rounds = 10, draws = 12000,
+    salaryTarget = 0.64, stackTarget = 0.62, bringBackTarget = 0.19 } = opts;
+  const POS = ["QB", "RB", "WR", "TE", "DST"];
+  const P = players.filter(p => p.salary > 0 && isFinite(p.salary) && POS.includes(p.position));
+  const n = P.length; if (n < 9) return null;
+  const U = 100, capU = Math.floor(salaryCap / U);
+  const sal = P.map(p => Math.round(p.salary / U));
+  const pos = P.map(p => p.position), team = P.map(p => p.team), opp = P.map(p => oppTeam(p));
+  const byPos = { QB: [], RB: [], WR: [], TE: [], DST: [] };
+  P.forEach((p, i) => byPos[p.position].push(i));
+  if (!byPos.QB.length || !byPos.DST.length || byPos.RB.length < 2 || byPos.WR.length < 3 || byPos.TE.length < 1) return null;
+  const FX = ["RB", "WR", "TE"].filter(x => flexEligible.has(x));
+  if (!FX.length) return null;
+  const combos = FX.map(x => ({ RB: 2 + (x === "RB" ? 1 : 0), WR: 3 + (x === "WR" ? 1 : 0), TE: 1 + (x === "TE" ? 1 : 0) }));
+  const flexGroup = [...byPos.RB, ...byPos.WR, ...byPos.TE];
+  const t = new Float64Array(n);
+  const own = P.map(p => _ownOf(p, ownershipField) / 100);
+  const setT = (idx, sum) => { const v = _normTargets(idx.map(i => own[i]), sum, 0.97); idx.forEach((i, k) => { t[i] = v[k]; }); };
+  setT(byPos.QB, 1); setT(byPos.DST, 1); setT(flexGroup, 7);
+  const lw = Float64Array.from(t, v => Math.log(v));
+  const g = new Float64Array(n).fill(1);
+  if (vegasContext && vegasContext.impliedTotal && vegasContext.avgGameTotal) {
+    for (const i of byPos.QB) {
+      const a = vegasContext.impliedTotal.get(team[i]), b = vegasContext.impliedTotal.get(opp[i]);
+      if (a != null && b != null) g[i] = Math.min(1.6, Math.max(0.6, (a + b) / vegasContext.avgGameTotal));
+    }
+  }
+  let tau = 300, aS = 1, bB = 0;
+  const phi = (q, i) => {
+    if (pos[i] === "QB" || pos[i] === "DST") return 0;
+    if (team[i] === team[q]) return (pos[i] === "WR" || pos[i] === "TE") ? aS * g[q] : 0;
+    if (team[i] === opp[q]) return bB * g[q];
+    return 0;
+  };
+  // prefix ESP tables for one position under QB q: tab[m] = Float64Array((kmax+1)*S)
+  const espTab = (idx, kmax, B, q) => {
+    const S = B + 1, L = idx.filter(i => sal[i] <= B);
+    let E = new Float64Array((kmax + 1) * S); E[0] = 1;
+    const tabs = [E.slice()];
+    for (const i of L) {
+      const si = sal[i], wi = Math.exp(lw[i] + phi(q, i));
+      for (let k = kmax - 1; k >= 0; k--) { const src = k * S, dst = (k + 1) * S + si; for (let x = B - si; x >= 0; x--) { const v = E[src + x]; if (v) E[dst + x] += wi * v; } }
+      tabs.push(E.slice());
+    }
+    return { L, tabs, S, last: (k) => E.subarray(k * S, (k + 1) * S), q };
+  };
+  const conv = (a, b, B) => { const o = new Float64Array(B + 1); for (let x = 0; x <= B; x++) { const ax = a[x]; if (!ax) continue; for (let y = 0; x + y <= B; y++) { const by = b[y]; if (by) o[x + y] += ax * by; } } return o; };
+  const dstArr = (B) => { const o = new Float64Array(B + 1); for (const i of byPos.DST) if (sal[i] <= B) o[sal[i]] += Math.exp(lw[i]); return o; };
+  const perQB = (q) => {
+    const B = capU - sal[q]; if (B < 0) return null;
+    const R = espTab(byPos.RB, 3, B, q), W = espTab(byPos.WR, 4, B, q), T = espTab(byPos.TE, 2, B, q), Dd = dstArr(B);
+    const cbs = combos.map(cb => {
+      const A1 = conv(R.last(cb.RB), W.last(cb.WR), B), A2 = conv(A1, T.last(cb.TE), B), A3 = conv(A2, Dd, B);
+      const fin = new Float64Array(B + 1); let z = 0;
+      for (let x = 0; x <= B; x++) if (A3[x]) { fin[x] = A3[x] * Math.exp(-((B - x) * U) / tau); z += fin[x]; }
+      return { cb, A1, A2, fin, z };
+    });
+    return { B, R, W, T, Dd, cbs, z: cbs.reduce((a, c) => a + c.z, 0) };
+  };
+  // draw k players from position table with total salary x (backward)
+  const drawSet = (tab, k, x, rng, out) => {
+    const S = tab.S;
+    for (let m = tab.L.length; m >= 1 && k > 0; m--) {
+      const i = tab.L[m - 1], si = sal[i];
+      const cur = tab.tabs[m][k * S + x];
+      const take = x - si >= 0 ? Math.exp(lw[i] + phi(tab.q, i)) * tab.tabs[m - 1][(k - 1) * S + x - si] : 0;
+      if (cur > 0 && rng() * cur < take) { out.push(i); k--; x -= si; }
+    }
+  };
+  const rng = mulberry32(seed);
+  let fit = null, Zq = null;
+  const zOnly = (q) => { const d = perQB(q); return d ? Math.exp(lw[q]) * d.z : 0; };
+  for (let r = 0; r < rounds; r++) {
+    const last = r === rounds - 1;
+    Zq = new Float64Array(n);
+    for (const q of byPos.QB) Zq[q] = zOnly(q);
+    const per = _multinomial(draws, Zq, rng);
+    const cnt = new Float64Array(n);
+    let tot0 = 0, hi = 0, nst = 0, nbb = 0;
+    for (const q of byPos.QB) {
+      if (!per[q]) continue;
+      const d = perQB(q);
+      const cz = d.cbs.map(c => c.z);
+      for (let m = 0; m < per[q]; m++) {
+        const ci = _drawIdx(cz, rng); if (ci < 0) continue;
+        const C = d.cbs[ci], B = d.B;
+        const x = _drawIdx(C.fin, rng); if (x < 0) continue;
+        // DST salary
+        const wy = new Float64Array(x + 1); for (let y = 0; y <= x; y++) wy[y] = d.Dd[y] * C.A2[x - y];
+        const y = _drawIdx(wy, rng); if (y < 0) continue;
+        const dsts = byPos.DST.filter(i => sal[i] === y); const di = dsts[_drawIdx(dsts.map(i => Math.exp(lw[i])), rng)];
+        const x2 = x - y, tl = d.T.last(C.cb.TE);
+        const wt = new Float64Array(x2 + 1); for (let yy = 0; yy <= x2; yy++) wt[yy] = tl[yy] * C.A1[x2 - yy];
+        const yT = _drawIdx(wt, rng); if (yT < 0) continue;
+        const x1 = x2 - yT, rl = d.R.last(C.cb.RB), wl = d.W.last(C.cb.WR);
+        const ww = new Float64Array(x1 + 1); for (let yy = 0; yy <= x1; yy++) ww[yy] = wl[yy] * rl[x1 - yy];
+        const yW = _drawIdx(ww, rng); if (yW < 0) continue;
+        const G = [];
+        drawSet(d.T, C.cb.TE, yT, rng, G); drawSet(d.W, C.cb.WR, yW, rng, G); drawSet(d.R, C.cb.RB, x1 - yW, rng, G);
+        tot0++; cnt[q]++; cnt[di]++; for (const i of G) cnt[i]++;
+        if ((B - x) * U <= 100) hi++;
+        if (G.some(i => team[i] === team[q] && (pos[i] === "WR" || pos[i] === "TE"))) nst++;
+        if (G.some(i => team[i] === opp[q])) nbb++;
+      }
+    }
+    let err = 0;
+    for (let i = 0; i < n; i++) {
+      const rv = cnt[i] / tot0; err += Math.abs(rv - t[i]);
+      if (!last) lw[i] += Math.max(-1, Math.min(1, 0.9 * Math.log((t[i] + 1e-4) / (rv + 1e-4))));
+    }
+    const pHi = hi / tot0, pSt = nst / tot0, pBb = nbb / tot0;
+    fit = { ownErrPts: 100 * err / n, salaryShare: pHi, stackRate: pSt, bringBackRate: pBb };
+    if (opts.debug) opts.debug(r, fit, tau, aS, bB);
+    if (last) break;
+    const eta = 0.7 / (1 + r / 4);
+    tau = Math.min(5000, Math.max(20, tau * Math.exp(-eta * (_logit(salaryTarget) - _logit(pHi))))); // too few near the cap: lower tau
+    aS = Math.max(-2, Math.min(5, aS + eta * (_logit(stackTarget) - _logit(pSt))));
+    bB = Math.max(-3, Math.min(4, bB + eta * (_logit(bringBackTarget) - _logit(pBb))));
+  }
+  const Z = Zq.reduce((a, b) => a + b, 0), logZ = Math.log(Z);
+  const ix = new Map(P.map((p, i) => [p.id, i]));
+  const countsOk = (G) => {
+    let rb = 0, wr = 0, te = 0;
+    for (const i of G) { if (pos[i] === "RB") rb++; else if (pos[i] === "WR") wr++; else te++; }
+    return combos.some(cb => cb.RB === rb && cb.WR === wr && cb.TE === te);
+  };
+  return {
+    isShowdown: false,
+    info: { ...fit, tau, stackCoef: aS, bringBackCoef: bB, vegas: !!(vegasContext && vegasContext.impliedTotal), players: n },
+    logProb(arr) {
+      const idx = arr.map(p => ix.get(p.id)); if (idx.length !== 9 || idx.some(i => i == null)) return -Infinity;
+      const qs = idx.filter(i => pos[i] === "QB"), ds = idx.filter(i => pos[i] === "DST"), G = idx.filter(i => pos[i] !== "QB" && pos[i] !== "DST");
+      if (qs.length !== 1 || ds.length !== 1 || G.length !== 7 || !countsOk(G)) return -Infinity;
+      const q = qs[0]; let s0 = sal[q] + sal[ds[0]]; for (const i of G) s0 += sal[i];
+      if (s0 > capU) return -Infinity;
+      let lp = lw[q] + lw[ds[0]];
+      for (const i of G) lp += lw[i] + phi(q, i);
+      return lp - ((capU - s0) * U) / tau - logZ;
+    },
+  };
+}
+
 /**
  * Expected number of OTHER real entries holding exactly each user lineup, from the field model itself.
  * Returns [{ det, casual }] per lineup (det = copies the field carries explicitly in its consensus / sharp
@@ -3718,6 +4033,19 @@ function estimateDupes(userLineups, field, opts = {}) {
     }
     return Math.exp(logP);
   };
+  if (field.dupModel) {
+    // Expected copies = (entries - 1) x the model's probability that one entrant builds exactly this roster.
+    // Rosters the opponent field carries explicitly (matched archetypes) count toward that expectation, not on top.
+    const N1 = Math.max(0, totalEntries - 1);
+    const matchW = new Map(); archetypes.forEach((a, i) => { const k = sigFn(a); matchW.set(k, (matchW.get(k) || 0) + archetypeWeights[i]); });
+    const res = userLineups.map(arr => {
+      const lp = field.dupModel.logProb(arr);
+      const lam = isFinite(lp) ? N1 * Math.exp(lp) : 0;
+      const det = matchW.get(sigFn(arr)) || 0;
+      return { det: det * mult, casual: Math.max(0, lam - det) * mult, model: lam };
+    });
+    return total ? res.map(x => x.det + x.casual) : res;
+  }
   const out = userLineups.map(arr => {
     const sig = sigFn(arr);
     const det = detBySig.get(sig) || 0;
@@ -4269,7 +4597,7 @@ const DFSEngine = {
   overlapCount, generateTopN, generateCorrelatedLineups,
   solveExactOptimal, boundedKnapsackTable, convolve, reconstruct, parseVegasLines, swapNeighbors,
   parseOddsApiResponse, nflTeamNameToAbbr, simulateLineups, boxMullerZ, splitNormalFromZ,
-  parsePayoutTable, parseContestEntryCount, payoutForRank, estimateDupes, showdownFieldProb, simulateContestROI, simulateContestROIMulti, buildSyntheticField,
+  parsePayoutTable, parseContestEntryCount, payoutForRank, estimateDupes, showdownFieldProb, getDupModel, fitShowdownDupModel, fitClassicDupModel, simulateContestROI, simulateContestROIMulti, buildSyntheticField,
   showdownStructureOk, showdownSplitAllowed, buildShowdownScenarioPool,
   buildFieldArchetype, buildShowdownFieldArchetype, weightedRandomPick,
   solveExactShowdownOptimal, buildShowdownLineup, swapShowdownNeighbors, generateShowdownTopN,
@@ -5568,7 +5896,7 @@ if (typeof window !== "undefined") {
     const SB = Math.floor(Math.random() * 1e6);
     const field = getContestField(c, { fieldSampleSize, sharpShare: sbs.sharp / 100, consensusShare: sbs.cons / 100, isShowdown: false, seed: 1 + SB });
     const simBase = { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations, vegasContext: state.vegasContext };
-    const evalMany = (arrs) => eng.simulateContestROIMulti(arrs, field, { ...simBase, seed: 101 + SB, dupMult: dupMult() });
+    const evalMany = (arrs) => eng.simulateContestROIMulti(arrs, field, { ...simBase, seed: 101 + SB });
     setStatus(`Tuning ${TYPE_LABEL[type]} lineups to ${c.label}: scoring ${cands.size.toLocaleString()} candidates…`); setProg(55); await tick();
     let list = [...cands.values()];
     let res = evalMany(list.map(x => x.arr));
@@ -5598,7 +5926,7 @@ if (typeof window !== "undefined") {
       setStatus(`Tuning ${TYPE_LABEL[type]} lineups to ${c.label}: finalist round on ${it2.toLocaleString()} fresh slates…`); setProg(82); await tick();
       const f2 = getContestField(c, { fieldSampleSize, sharpShare: sbs.sharp / 100, consensusShare: sbs.cons / 100, isShowdown: false, seed: 55 + SB });
       const fa = fin.map(x => x.arr);
-      const r2 = eng.simulateContestROIMulti(fa, f2, { ...simBase, iterations: it2, seed: 303 + SB, dupMult: dupMult() });
+      const r2 = eng.simulateContestROIMulti(fa, f2, { ...simBase, iterations: it2, seed: 303 + SB });
       const w = it2 / (it2 + iterations);
       fin.forEach((x, i) => {
         const o = { ...x.res };
@@ -5614,7 +5942,7 @@ if (typeof window !== "undefined") {
     const oosField = getContestField(c, { fieldSampleSize, sharpShare: sbs.sharp / 100, consensusShare: sbs.cons / 100, isShowdown: false, seed: 99 + SB });
     const origArrs = (state.results[type] || []).map(r => r.arr), tunedArrs = chosen.map(x => x.arr);
     const allArrs = [...tunedArrs, ...origArrs];
-    const oos = eng.simulateContestROIMulti(allArrs, oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 + SB, dupMult: dupMult() });
+    const oos = eng.simulateContestROIMulti(allArrs, oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 + SB });
     const avg = (rs, k) => rs.length ? rs.reduce((a, r) => a + r[k], 0) / rs.length : null;
     const tOos = oos.slice(0, tunedArrs.length), oOos = oos.slice(tunedArrs.length);
     const hasBB = (arr) => { const q = arr.find(p => p.position === "QB"); return !!q && arr.some(p => p.team === eng.oppTeam(q) && p.position !== "DST"); };
@@ -6073,7 +6401,9 @@ if (typeof window !== "undefined") {
   /** Builds (or reuses a cached) synthetic opponent field for the given contest. */
   function getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed = 1 }) {
     const fieldPlayers = state.generationPool || state.players;
-    const fieldKey = [c.totalEntries, fieldSampleSize, sharpShare, consensusShare, isShowdown, getSalaryCap(), seed, "rake"].join("|");
+    const flexEligible = els.toggleTEFlex && !els.toggleTEFlex.checked ? new Set(["RB", "WR"]) : new Set(["RB", "WR", "TE"]);
+    const vSig = state.vegasContext ? [...state.vegasContext.impliedTotal.entries()].sort().join(",") : "";
+    const fieldKey = [c.totalEntries, fieldSampleSize, sharpShare, consensusShare, isShowdown, getSalaryCap(), seed, "rake", [...flexEligible].join(""), vSig].join("|");
     let field;
     if (state.fieldCache && state.fieldCache.players === fieldPlayers && state.fieldCache.key === fieldKey) {
       field = state.fieldCache.field; // same inputs as last run — reuse the built field
@@ -6082,10 +6412,12 @@ if (typeof window !== "undefined") {
         totalEntries: c.totalEntries, fieldSampleSize, seed, sharpShare, consensusShare,
         ownershipField: "ownLarge", isShowdown, salaryCap: getSalaryCap(),
         rakeOwnership: true, // calibrate the FULL blended field (casual + sharp + consensus) to the published ownership
+        flexEligible, vegasContext: state.vegasContext, // the duplicate model uses both
       });
       state.fieldCache = { players: fieldPlayers, key: fieldKey, field };
     }
     state.fieldInfo = field.info || null;
+    state.dupModelInfo = field.dupModel ? { ...field.dupModel.info, isShowdown: field.dupModel.isShowdown } : null;
     return field;
   }
 
@@ -6341,7 +6673,7 @@ if (typeof window !== "undefined") {
         let acc = null;
         for (let pp = 0; pp < passes; pp++) {
           if (pp > 0) { statusEl.textContent = `Pass ${pp + 1} of ${passes}…`; await new Promise(r => setTimeout(r, 15)); }
-          const r = eng.simulateContestROIMulti(arrs, fields[pp], { ...simBase, seed: 101 + pp + SB, dupMult: dupMult() });
+          const r = eng.simulateContestROIMulti(arrs, fields[pp], { ...simBase, seed: 101 + pp + SB });
           if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes, roiTruePct: x.roiTruePct / passes, winAdjPct: x.winAdjPct / passes, dupEst: x.dupEst / passes, top1Pct: x.top1Pct / passes, top10Pct: (x.top10Pct || 0) / passes, winPct: x.winPct / passes }));
           else r.forEach((x, i) => { acc[i].top10Pct += (x.top10Pct || 0) / passes; acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; acc[i].roiTruePct += x.roiTruePct / passes; acc[i].winAdjPct += x.winAdjPct / passes; acc[i].dupEst += x.dupEst / passes; acc[i].top1Pct += x.top1Pct / passes; acc[i].winPct += x.winPct / passes; });
         }
@@ -6406,7 +6738,7 @@ if (typeof window !== "undefined") {
     const refine = (xs, cx) => {
       if (!xs.length) return;
       const arrs = xs.map(x => simArr(x.arr));
-      const r2 = eng.simulateContestROIMulti(arrs, cx.f, { ...simBase, iterations: cx.it, seed: cx.seed, dupMult: dupMult() });
+      const r2 = eng.simulateContestROIMulti(arrs, cx.f, { ...simBase, iterations: cx.it, seed: cx.seed });
       xs.forEach((x, i) => {
         const w0 = x.w || iterations * passes, o = { ...x.res };
         for (const k of MERGE_KEYS) o[k] = ((x.res[k] || 0) * w0 + (r2[i][k] || 0) * cx.it) / (w0 + cx.it);
@@ -6488,7 +6820,7 @@ if (typeof window !== "undefined") {
       // validated score — the selection-time ranking carries luck from the search itself.
       const oosField = getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 99 + SB });
       const oosAll = [...mine, ...base];
-      const oos = eng.simulateContestROIMulti(oosAll, oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 + SB, dupMult: dupMult() });
+      const oos = eng.simulateContestROIMulti(oosAll, oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 + SB });
       let oosMine = oos.slice(0, mine.length);
       const oosBase = oos.slice(mine.length);
       // order by everything known about each pick: its search re-tests plus this fresh check
@@ -6561,8 +6893,15 @@ if (typeof window !== "undefined") {
   });
   document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeLineupModal(); });
 
-  // "Field duplication": scales the model's expected duplicate count for every simulated lineup.
-  function dupMult() { const el = document.getElementById("dupMult"); const v = el ? parseFloat(el.value) : 1; return isFinite(v) && v > 0 ? v : 1; }
+  // One line describing how duplicates were estimated, from the fitted field model
+  function dupModelNote() {
+    const m = state.dupModelInfo; if (!m) return "";
+    const pc = (x) => Math.round(x * 100) + "%";
+    const body = m.isShowdown
+      ? `ownership (captain and flex${m.captainOwnership ? "" : " from total ownership"}, average miss ${m.ownErrPts.toFixed(1)} pts), salary use (${pc(m.salaryShare)} of lineups above $49,500) and team splits (${pc(m.fiveOne)} of lineups 5-1)`
+      : `ownership (average miss ${m.ownErrPts.toFixed(2)} pts), salary use (${pc(m.salaryShare)} of lineups within $100 of the cap), QB stacks (${pc(m.stackRate)}) and bring-backs (${pc(m.bringBackRate)})${m.vegas ? ", with each game's stack pull scaled by its Vegas total" : " (load Vegas lines to weight stacks by game total)"}`;
+    return `<b>Duplicates:</b> each lineup's expected copies come from a model of how the whole field builds lineups, fitted to your ${body}. Expected copies = entries × the model's chance one entrant builds that exact lineup.`;
+  }
   function sbSettings() {
     const num = (id, d) => { const e = document.getElementById(id); const v = e ? parseInt(e.value, 10) : NaN; return Number.isFinite(v) ? v : d; };
     const rb = document.getElementById("rankBy");
@@ -7150,7 +7489,7 @@ if (typeof window !== "undefined") {
         }
         if (entries.length) {
           msg(`Contest ${ci + 1} of ${contests.length}: running ${entries.length} lineups through ${c.label}…`); await tick();
-          out.push(eng.simulateContestROIMulti(entries.map(e => e.arr), field, { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations: st.iters, seed: runSeed + 1 + ci, vegasContext: st.vegas, teamWeight: st.teamW, gameWeightBase: st.gameW, dupMult: dupMult() }));
+          out.push(eng.simulateContestROIMulti(entries.map(e => e.arr), field, { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations: st.iters, seed: runSeed + 1 + ci, vegasContext: st.vegas, teamWeight: st.teamW, gameWeightBase: st.gameW }));
         }
         simProg(40 + 55 * (ci + 1) / contests.length); await tick();
       }
@@ -7173,7 +7512,7 @@ if (typeof window !== "undefined") {
         const own = p.ownLarge != null && !isNaN(p.ownLarge) ? p.ownLarge : (p.own || 0);
         return { p, mean: v.reduce((a, b) => a + b, 0) / v.length, p10: q(0.1), p90: q(0.9), p99: q(0.99), boom: boom / sim.iters * 100, opt: optPct, cpt: cptPct, own, field: fieldOwn.get(p.id) || 0, lev: optPct == null ? null : optPct - own };
       });
-      state.sim = { site: siteKey(), iters: st.iters, sharp: st.sharp, vegas: !!st.vegas, contests: contests.map(c => ({ id: c.id, name: c.label, short: shortOf(c), entries: c.totalEntries, fee: c.entryFee, pool: contestPool(c), paid: contestPaid(c) })),
+      state.sim = { site: siteKey(), iters: st.iters, sharp: st.sharp, vegas: !!st.vegas, dupNote: dupModelNote(), contests: contests.map(c => ({ id: c.id, name: c.label, short: shortOf(c), entries: c.totalEntries, fee: c.entryFee, pool: contestPool(c), paid: contestPaid(c) })),
         mine, players, opt, fieldAvg, mineStale: false, poolChanged: false, seconds: (performance.now() - t0) / 1000, boomX, sd };
       // feeds the player/stack attribution tables below the lineups
       state.activeContestPresetId = contests[0].id;
@@ -7278,6 +7617,7 @@ if (typeof window !== "undefined") {
     if (R.poolChanged) notes.push("<b>Your player pool changed since this run.</b> Run the simulation again to use the new numbers.");
     if (R.mineStale) notes.push("<b>You rebuilt your lineups after this run.</b> These results are for the previous set. Run the simulation again to score the new ones.");
     if (R.vegas) notes.push("Vegas lines are shaping this run: game totals set how much each game swings together.");
+    if (R.dupNote) notes.push(R.dupNote);
     notes.push(`Results assume your projections are right, so treat ROI as a way to compare lineups rather than a forecast. Field: ${R.sharp}% optimizer users, the rest picking by projected ownership. Contests: ${R.contests.map(c => `<b>${escapeHtml(c.name)}</b> (${c.entries.toLocaleString()} entries, ${fmtMoney(c.fee)}, ${fmtMoney(c.pool)} prizes, top ${c.paid.toLocaleString()} paid)`).join("; ")}. <b>ROI</b> is average payout against the entry fee. The top of the opponent field is extrapolated from the sampled lineups, so rare big finishes aren't over-credited, but a single first place can still move ROI a lot, so lean on Cash and Top 1% too.`);
     note.innerHTML = `<div class="simnote">${notes.join("<br>")}</div>`;
 
@@ -7341,7 +7681,7 @@ if (typeof window !== "undefined") {
     stats.hidden = false;
     stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg top 1%", pctFmt(B.oosTop1)], ["Avg win", pctFmt(B.oosWin)], ["Avg ROI", sg(B.oosRoi) + "%"], ...(B.oosTrue != null ? [["Avg ROI if unique", sg(B.oosTrue) + "%"]] : []), ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
     note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.finalists ? ` Leaders were re-tested twice before the picks were made: the top ${B.finalists.K1 || B.finalists.K} on a second opponent field, then the top ${B.finalists.K} on a third (${B.finalists.runs.toLocaleString()} simulated slates each in total).` : ""}${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps", game: "game stacks" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
-      <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th><th class="n">ROI if unique</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td><td class="n">${B.oosTrue != null ? sg(B.oosTrue) + "%" : "—"}</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td><td class="n">${r.tru != null ? sg(r.tru) + "%" : "—"}</td></tr>`).join("")}</tbody></table></div><div class="simnote"><b>Duplicates:</b> "Dupes" is the expected number of other entries holding that exact lineup. Every ROI here already splits prizes with them; "ROI if unique" is what the lineup would return if nobody else had it, so the gap is what duplication is expected to cost. Change the estimate with <b>Field duplication</b> in the Simulate settings.</div>`;
+      <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th><th class="n">ROI if unique</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td><td class="n">${B.oosTrue != null ? sg(B.oosTrue) + "%" : "—"}</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td><td class="n">${r.tru != null ? sg(r.tru) + "%" : "—"}</td></tr>`).join("")}</tbody></table></div><div class="simnote"><b>Duplicates:</b> "Dupes" is the expected number of other entries holding that exact lineup. Every ROI here already splits prizes with them; "ROI if unique" is what the lineup would return if nobody else had it, so the gap is what duplication is expected to cost. ${dupModelNote().replace("<b>Duplicates:</b> ", "")}</div>`;
     if (B.res && B.fieldAvg) {
       const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));
       const ct = state.contestPresets.find(p => p.id === B.contestId);

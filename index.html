@@ -5520,7 +5520,7 @@ if (typeof window !== "undefined") {
       const ia = vegasForTeam(a, g), ib = vegasForTeam(b, g);
       const homeLbl = v && v.home && !v.noHome ? (canonTeam(a) === v.home ? a : b) : "";
       return `<div class="vrow" data-vk="${escapeHtml(g.key)}" data-a="${escapeHtml(a)}" data-b="${escapeHtml(b)}">
-        <div class="vt"><b>${escapeHtml(a)}</b> v <b>${escapeHtml(b)}</b>${homeLbl ? ` <small>at ${escapeHtml(homeLbl)}</small>` : ""}${v && v.src === "manual" ? " <small>· edited</small>" : v && v.at ? ` <small>· pulled ${new Date(v.at).toLocaleDateString([], { month: "short", day: "numeric" })}</small>` : ""}</div>
+        <div class="vt"><b>${escapeHtml(a)}</b> v <b>${escapeHtml(b)}</b>${homeLbl ? ` <small>at ${escapeHtml(homeLbl)}</small>` : ""}${v && v.tip ? ` <small>· ${escapeHtml(fmtKickoff(v.tip))}</small>` : ""}${v && v.src === "manual" ? " <small>· edited</small>" : v && v.at ? ` <small>· pulled ${new Date(v.at).toLocaleDateString([], { month: "short", day: "numeric" })}</small>` : ""}</div>
         <label>Total<input data-vf="total" type="number" step="0.5" inputmode="decimal" value="${v && v.total != null ? v.total : ""}" placeholder="–" aria-label="Total for ${escapeHtml(a)} v ${escapeHtml(b)}"></label>
         <label title="${escapeHtml(a)} spread">${escapeHtml(a)} ±<input data-vf="spread" type="number" step="0.5" inputmode="decimal" value="${sideA}" placeholder="–" aria-label="${escapeHtml(a)} spread"></label>
         <div class="vi">${ia && ib ? `Implied: ${escapeHtml(a)} <b>${f1(ia.implied)}</b> · ${escapeHtml(b)} <b>${f1(ib.implied)}</b>` : "No line yet"}</div></div>`;
@@ -6034,23 +6034,38 @@ if (typeof window !== "undefined") {
     };
   }
 
+  // Kickoff time of a player's game, from the Vegas lines pulled from The Odds API (null when unknown)
+  function kickoffOf(p) {
+    if (!p || !state.vegas) return null;
+    const v = state.vegas[pairKey(p.team, eng.oppTeam(p))];
+    return v && v.tip ? v.tip : null;
+  }
+  function fmtKickoff(t) { return t ? new Date(t).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : ""; }
+
+  // Display / upload order: QB, RB, RB, WR, WR, WR, TE, FLEX, DST. The FLEX goes to the player whose game
+  // kicks off LATEST (late swap keeps the most options open). Only a player from the position holding the
+  // extra body can sit in FLEX (3 RBs: one of the RBs), so the latest among those gets it. Ties, or no
+  // kickoff times, fall back to the cheapest of them. Within each position, earlier games come first.
   function slotOrder(arr) {
-    const order = { QB: 0, RB: 1, WR: 2, TE: 3, FLEX: 4, DST: 5 };
-    // Determine each player's displayed slot: fixed position, or FLEX if it's the
-    // "extra" one beyond that position's base allocation.
     const base = { QB: 1, RB: 2, WR: 3, TE: 1, DST: 1 };
-    const counts = {};
-    const withSlot = [];
-    // Players are already produced in slots order in our engine (QB,RB,WR,TE,FLEX,DST)
-    // but to be safe, recompute by walking the array and tracking counts per position.
-    const seenPerPos = {};
-    for (const p of arr) {
-      seenPerPos[p.position] = (seenPerPos[p.position] || 0) + 1;
-      const isOverBase = seenPerPos[p.position] > (base[p.position] || 0);
-      withSlot.push({ p, slot: isOverBase ? "FLEX" : p.position });
+    const byPos = {};
+    for (const p of arr) (byPos[p.position] = byPos[p.position] || []).push(p);
+    const ko = (p) => kickoffOf(p);
+    const early = (a, b) => { const x = ko(a), y = ko(b); if (x != null && y != null && x !== y) return x - y; if (x != null && y == null) return -1; if (x == null && y != null) return 1; return b.salary - a.salary; };
+    let flex = null;
+    for (const pos of ["RB", "WR", "TE"]) {
+      const g = byPos[pos] || [];
+      if (g.length > base[pos]) {
+        const latest = g.slice().sort(early).pop(); // latest kickoff (or cheapest when unknown / tied)
+        if (!flex || early(flex, latest) < 0) flex = latest;
+      }
     }
-    withSlot.sort((a, b) => order[a.slot] - order[b.slot]);
-    return withSlot;
+    const out = [];
+    for (const pos of ["QB", "RB", "WR", "TE"]) for (const p of (byPos[pos] || []).filter(q => q !== flex).sort(early)) out.push({ p, slot: pos });
+    if (flex) out.push({ p: flex, slot: "FLEX" });
+    for (const p of (byPos.DST || [])) out.push({ p, slot: "DST" });
+    for (const p of arr) if (!out.some(o => o.p === p)) out.push({ p, slot: p.position }); // anything unexpected stays visible
+    return out;
   }
 
   function renderLineupCard(arr, idx, opts = {}) {
@@ -6110,7 +6125,7 @@ if (typeof window !== "undefined") {
         ? `<td class="num">${fmtNum(leverageScorePerPlayer(p, leverageMeta.ownershipField, leverageMeta.ownershipWeight, leverageMeta.ceilingWeight))}</td>`
         : "";
       return `<tr class="${rowClass}">
-        <td class="slot">${slot}</td>
+        <td class="slot"${slot === "FLEX" && kickoffOf(p) ? ` title="Latest game in this lineup: ${escapeHtml(fmtKickoff(kickoffOf(p)))}"` : ""}>${slot}</td>
         <td>${escapeHtml(p.name)}</td>
         <td>${escapeHtml(p.team)}</td>
         <td>${escapeHtml(p.opp)}</td>
@@ -7280,9 +7295,9 @@ if (typeof window !== "undefined") {
       $("resBody").innerHTML = `<table class="lu"><thead><tr><th>#</th>${slotNames().map(s => `<th>${s}</th>`).join("")}<th class="n">Salary</th><th class="n">Proj</th><th class="n">Ceil</th><th class="n">Own%</th>${gpp ? '<th class="n">Leverage</th>' : ""}${simHead}</tr></thead><tbody>` +
         L.map(x => {
           const qb = !sd ? x.arr.find(p => p.position === "QB") : null;
-          return `<tr><td class="rank"><a href="#" class="lineup-link" data-lineup-ref="${TYPE_LABEL[type]}|${x.i + 1}">${String(x.i + 1).padStart(3, "0")}</a></td>${orderedSlots(x.arr).map(({ p }) => {
-            const c = sd && p.isCaptain, stk = qb && p.position !== "DST" && p.team === qb.team;
-            return `<td class="slot"><span class="pl${c ? " cpt" : ""}${stk ? " stk" : ""}"><b>${escapeHtml(p.name)}</b><small>${escapeHtml(p.team)} · ${fmtMoney(c ? p.salary * 1.5 : p.salary)} · ${fmtNum(p.proj * (c ? 1.5 : 1))}</small></span></td>`;
+          return `<tr><td class="rank"><a href="#" class="lineup-link" data-lineup-ref="${TYPE_LABEL[type]}|${x.i + 1}">${String(x.i + 1).padStart(3, "0")}</a></td>${orderedSlots(x.arr).map(({ p, slot }) => {
+            const c = sd && p.isCaptain, stk = qb && p.position !== "DST" && p.team === qb.team, ko = !sd && slot === "FLEX" ? kickoffOf(p) : null;
+            return `<td class="slot"${ko ? ` title="FLEX: latest kickoff in this lineup (${escapeHtml(fmtKickoff(ko))})"` : ""}><span class="pl${c ? " cpt" : ""}${stk ? " stk" : ""}"><b>${escapeHtml(p.name)}</b><small>${escapeHtml(p.team)} · ${fmtMoney(c ? p.salary * 1.5 : p.salary)} · ${fmtNum(p.proj * (c ? 1.5 : 1))}</small></span></td>`;
           }).join("")}<td class="n"><span class="cap" title="${fmtMoney(cap - x.sal)} left"><span>${fmtMoney(x.sal)}</span><i style="--w:${(x.sal / cap * 100).toFixed(1)}%"></i></span></td><td class="n"><b>${fmtNum(x.proj)}</b></td><td class="n">${fmtNum(x.ceil)}</td><td class="n">${fmtNum(x.own)}</td>${gpp ? `<td class="n">${fmtNum(x.lev)}</td>` : ""}${simCells(x.arr)}</tr>`;
         }).join("") + "</tbody></table>";
     } else {

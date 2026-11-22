@@ -1175,6 +1175,7 @@ table.carry td { padding: 4px 6px; border-bottom: 1px solid var(--line-soft); }
         <div class="field"><label for="oddsApiKey">API key</label>
           <input type="password" id="oddsApiKey" class="txt" autocomplete="off" placeholder="Paste your key">
           <button type="button" class="btn primary" id="vegasFetchLiveBtn" style="justify-content:center">Pull lines</button>
+          <button type="button" class="btn" id="qbPropsBtn" style="justify-content:center" title="Passing and rushing yards and touchdowns for each QB, one request per game (4 credits each). Used only by Sim-built.">Pull QB props</button>
           <span class="hint vmsg" id="oddsMsg">Each pull uses 2 credits (spreads + totals). Your key stays on this device.</span></div>
         <div id="vegasGames"></div>
         <details class="vpaste"><summary>Can't pull? Paste the API's JSON instead</summary>
@@ -2973,8 +2974,20 @@ function pairCorr(table, a, b) {
 }
 
 /** Builds a sampler of correlated standard-normal draws, one per entry of `list` (distinct players). */
+// QB rushing share (part of a QB's fantasy points from running). The position tables above describe a
+// typical QB, who gets about 12% of his points rushing. A QB who gets more of his scoring on the ground is
+// less tied to his pass catchers (his rushing touchdowns don't score for them) and slightly negatively
+// tied to his own RB (they compete for short touchdowns). qbRush: Map player id -> share (0..1).
+const QB_RUSH_BASE = 0.12;
+function qbRushAdjust(r, qb, other, share) {
+  if (share == null || !isFinite(share)) return r;
+  const s = Math.min(0.7, Math.max(0, share));
+  if (other.position === "WR" || other.position === "TE") return r * Math.min(1.15, Math.max(0.3, (1 - s) / (1 - QB_RUSH_BASE)));
+  if (other.position === "RB") return r - 0.6 * (s - QB_RUSH_BASE);
+  return r;
+}
 function makeCorrelatedSampler(list, opts = {}) {
-  const { teamScale = 1, gameScaleFn = null } = opts;
+  const { teamScale = 1, gameScaleFn = null, qbRush = null } = opts;
   const n = list.length;
   const teamOpp = new Map();
   for (const p of list) if (p.position !== "DST" && !teamOpp.has(p.team) && p.opp) teamOpp.set(p.team, oppTeam(p));
@@ -2999,8 +3012,11 @@ function makeCorrelatedSampler(list, opts = {}) {
       for (let b = a + 1; b < m; b++) {
         const pa = list[idx[a]], pb = list[idx[b]];
         let r;
-        if (pa.team === pb.team) r = pairCorr(CORR_SAME, pa.position, pb.position) * teamScale;
-        else { r = pairCorr(CORR_OPP, pa.position, pb.position); if (r > 0) r *= gs; }
+        if (pa.team === pb.team) {
+          r = pairCorr(CORR_SAME, pa.position, pb.position);
+          if (qbRush) { if (pa.position === "QB") r = qbRushAdjust(r, pa, pb, qbRush.get(pa.id)); else if (pb.position === "QB") r = qbRushAdjust(r, pb, pa, qbRush.get(pb.id)); }
+          r *= teamScale;
+        } else { r = pairCorr(CORR_OPP, pa.position, pb.position); if (r > 0) r *= gs; }
         R[a][b] = R[b][a] = r;
       }
     }
@@ -4242,7 +4258,7 @@ function simulateContestROIMulti(userLineups, field, opts) {
     const game = gameOfTeam.get(tA);
     return gameWeightFor(game) / 0.15;
   };
-  const sampler = makeCorrelatedSampler(distinct, { teamScale: teamWeight / 0.35, gameScaleFn });
+  const sampler = makeCorrelatedSampler(distinct, { teamScale: teamWeight / 0.35, gameScaleFn, qbRush: opts.qbRush || null });
   for (let it = 0; it < iterations; it++) {
     sampler.draw(rngSim, zs);
 
@@ -4597,7 +4613,7 @@ const DFSEngine = {
   overlapCount, generateTopN, generateCorrelatedLineups,
   solveExactOptimal, boundedKnapsackTable, convolve, reconstruct, parseVegasLines, swapNeighbors,
   parseOddsApiResponse, nflTeamNameToAbbr, simulateLineups, boxMullerZ, splitNormalFromZ,
-  parsePayoutTable, parseContestEntryCount, payoutForRank, estimateDupes, showdownFieldProb, getDupModel, fitShowdownDupModel, fitClassicDupModel, simulateContestROI, simulateContestROIMulti, buildSyntheticField,
+  parsePayoutTable, parseContestEntryCount, payoutForRank, estimateDupes, showdownFieldProb, getDupModel, fitShowdownDupModel, fitClassicDupModel, simulateContestROI, simulateContestROIMulti, makeCorrelatedSampler, buildSyntheticField,
   showdownStructureOk, showdownSplitAllowed, buildShowdownScenarioPool,
   buildFieldArchetype, buildShowdownFieldArchetype, weightedRandomPick,
   solveExactShowdownOptimal, buildShowdownLineup, swapShowdownNeighbors, generateShowdownTopN,
@@ -5498,7 +5514,7 @@ if (typeof window !== "undefined") {
       // After kickoff the books post live in-game lines. Keep the pre-game line if there is one.
       const tip = ev.commence_time ? Date.parse(ev.commence_time) : null, prev = state.vegas[k];
       if (tip && tip <= now && prev && (prev.src === "manual" || (prev.at && prev.at < tip))) { kept++; continue; }
-      state.vegas[k] = { home, away, total: median(totals), homeSpread: median(spreads), books: (ev.bookmakers || []).length, src: "api", at: now, tip };
+      state.vegas[k] = { home, away, total: median(totals), homeSpread: median(spreads), books: (ev.bookmakers || []).length, src: "api", at: now, tip, eventId: ev.id || (prev && prev.eventId) || null };
       stored++;
     }
     return { stored, kept };
@@ -5532,6 +5548,83 @@ if (typeof window !== "undefined") {
     if (!games) return { t: `Pulled lines for ${r.stored} games. Load a slate and they will be matched to it.${left != null ? ` ${left} API credits left.` : ""}`, ok: r.stored > 0 };
     return { t: `Matched ${matched} of ${games} games (consensus of US sportsbooks).${r.kept ? ` ${r.kept} already kicked off, so their pre-game lines were kept.` : ""}${left != null ? ` ${left} API credits left.` : ""}${matched < games ? " Lines may not be posted yet for the rest; you can type them in." : ""}`, ok: matched > 0 };
   }
+
+  /* ---------------- QB passing / rushing props (The Odds API) ----------------
+     Used ONLY by Sim-built: each QB's share of fantasy points from rushing sets how tightly the simulation ties
+     him to his pass catchers and RB (see qbRushAdjust in the engine). Not shown anywhere else. */
+  const STORAGE_KEY_QB_PROPS = "gridlock_qb_props";
+  const normName = (n) => String(n || "").toLowerCase().replace(/[.'’,-]/g, " ").replace(/\b(jr|sr|ii|iii|iv|v)\b/g, " ").replace(/\s+/g, " ").trim();
+  try { const g = safeStorageGet(STORAGE_KEY_QB_PROPS); state.qbProps = g ? JSON.parse(g) : null; } catch (e) { state.qbProps = null; }
+  // P(X > L) for a Poisson count; solve for the mean that matches the market's over probability
+  const poisOver = (lam, L) => { let k = 0, p = Math.exp(-lam), cdf = 0; while (k <= Math.floor(L)) { cdf += p; k++; p *= lam / k; } return 1 - cdf; };
+  const lamFromOver = (L, pOver) => { let lo = 0.001, hi = 8; for (let i = 0; i < 50; i++) { const m = (lo + hi) / 2; if (poisOver(m, L) < pOver) lo = m; else hi = m; } return (lo + hi) / 2; };
+  const impP = (price) => price == null ? null : price > 0 ? 100 / (price + 100) : -price / (-price + 100);
+  function ingestQbProps(eventJsons) {
+    const per = new Map(); // name -> market -> [{point, pOver}]
+    for (const ev of eventJsons) for (const bk of (ev && ev.bookmakers) || []) for (const mk of bk.markets || []) {
+      if (!/^player_(pass|rush)_(yds|tds)$/.test(mk.key)) continue;
+      const byPl = new Map();
+      for (const o of mk.outcomes || []) { if (!o.description || typeof o.point !== "number") continue; const k = normName(o.description); if (!byPl.has(k)) byPl.set(k, {}); byPl.get(k)[o.name === "Under" ? "u" : "o"] = o; }
+      for (const [k, x] of byPl) {
+        if (!x.o) continue;
+        const po = impP(x.o.price), pu = x.u ? impP(x.u.price) : null;
+        const pOver = po == null ? 0.5 : pu != null ? po / (po + pu) : po * 0.95;
+        if (!per.has(k)) per.set(k, {});
+        const m = per.get(k); (m[mk.key] = m[mk.key] || []).push({ point: x.o.point, pOver });
+      }
+    }
+    const out = {};
+    for (const [k, m] of per) {
+      const yds = (key) => m[key] ? median(m[key].map(x => x.point)) : null;
+      const tds = (key) => m[key] ? median(m[key].map(x => lamFromOver(x.point, x.pOver))) : null;
+      const pY = yds("player_pass_yds"), rY = yds("player_rush_yds");
+      if (pY == null || rY == null) continue; // passers only, with both yardage lines
+      const pT = tds("player_pass_tds") ?? pY / 150, rT = tds("player_rush_tds") ?? rY / 120;
+      const passPts = 0.04 * pY + 4 * pT, rushPts = 0.1 * rY + 6 * rT;
+      if (passPts + rushPts <= 0) continue;
+      out[k] = { share: rushPts / (passPts + rushPts), pY, pT, rY, rT };
+    }
+    return out;
+  }
+  // QBs in the current pool with a rushing share from props: Map player id -> share
+  function qbRushMap() {
+    if (!state.qbProps || !state.qbProps.byName || !state.players) return null;
+    const m = new Map();
+    for (const p of state.players) if (p.position === "QB") { const x = state.qbProps.byName[normName(p.name)]; if (x) m.set(p.id, x.share); }
+    return m.size ? m : null;
+  }
+  async function pullQbProps() {
+    const key = els.oddsApiKey.value.trim();
+    if (!key) return vegasMsg("Enter your Odds API key first.", "err");
+    const btn = document.getElementById("qbPropsBtn");
+    btn.disabled = true; vegasMsg("Pulling QB passing and rushing props…");
+    try {
+      const games = vegasSlateGames();
+      if (!games.length) return vegasMsg("Load a slate first, so only its games are pulled.", "err");
+      let ids = new Map(games.map(g => [g.key, ((state.vegas || {})[g.key] || {}).eventId]).filter(([, id]) => id));
+      if (ids.size < games.length) {
+        const r = await fetch(`https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events?apiKey=${encodeURIComponent(key)}`, { cache: "no-store" });
+        if (!r.ok) return vegasMsg(r.status === 401 ? "The API key was rejected." : `The Odds API returned an error (${r.status}).`, "err");
+        for (const ev of await r.json()) { const k = pairKey(eng.nflTeamNameToAbbr(ev.home_team), eng.nflTeamNameToAbbr(ev.away_team)); if (games.some(g => g.key === k) && !ids.has(k)) ids.set(k, ev.id); }
+      }
+      const evs = []; let left = null, failed = 0;
+      for (const [, id] of ids) {
+        const r = await fetch(`https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/${encodeURIComponent(id)}/odds?apiKey=${encodeURIComponent(key)}&regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_rush_tds&oddsFormat=american`, { cache: "no-store" });
+        left = r.headers.get("x-requests-remaining") ?? left;
+        if (!r.ok) { failed++; if (r.status === 401 || r.status === 429) break; continue; }
+        evs.push(await r.json());
+      }
+      const byName = ingestQbProps(evs);
+      state.qbProps = { byName, at: Date.now() };
+      safeStorageSet(STORAGE_KEY_QB_PROPS, JSON.stringify(state.qbProps));
+      const n = Object.keys(byName).length;
+      vegasMsg(n ? `QB props saved for ${n} quarterback${n === 1 ? "" : "s"} across ${evs.length} games. Sim-built uses them to weigh rushing QBs' stacks.${left != null ? ` ${left} API credits left.` : ""}`
+        : `No QB props found${failed ? ` (${failed} games returned an error)` : ""}. Books usually post them a day or two before kickoff.${left != null ? ` ${left} API credits left.` : ""}`, n ? "ok" : "err");
+    } catch (e) {
+      vegasMsg("Couldn't reach The Odds API for props. Check your connection or ad blocker and try again.", "err");
+    } finally { btn.disabled = false; }
+  }
+  document.getElementById("qbPropsBtn").addEventListener("click", pullQbProps);
 
   document.getElementById("vegasGames").addEventListener("change", (e) => {
     const i = e.target.closest("input[data-vf]"); if (!i) return;
@@ -6676,14 +6769,15 @@ if (typeof window !== "undefined") {
         ["proj", "ceil"].forEach(k => (state.results[k] || []).forEach(arr => { if (added < levCount) { const n0 = cands.size; addCand(arr); added += cands.size - n0; } }));
       }
     });
-    let field, fields, evalMany, scorer, makeScorer, scored = [], simBase, finalInfo = null;
+    let field, fields, evalMany, scorer, makeScorer, scored = [], simBase, finalInfo = null, qbR = null;
     stages.push(async () => {
       statusEl.textContent = `Scoring ${cands.size.toLocaleString()} candidates in the contest simulation${passes > 1 ? " (" + passes + " passes, each with its own field and random slates)" : ""}…`;
       // each pass gets its own sampled opponent field and its own random slates; results are averaged
       fields = [];
       for (let pp = 0; pp < passes; pp++) fields.push(getContestField(c, { fieldSampleSize, sharpShare, consensusShare, isShowdown, seed: 1 + pp + SB }));
       field = fields[0];
-      simBase = { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations, vegasContext: state.vegasContext };
+      qbR = qbRushMap(); // QB rushing shares from props: Sim-built only
+      simBase = { payoutTable: c.payoutTable, entryFee: c.entryFee, iterations, vegasContext: state.vegasContext, qbRush: qbR };
       evalMany = async (arrs) => {
         let acc = null;
         for (let pp = 0; pp < passes; pp++) {
@@ -6855,7 +6949,7 @@ if (typeof window !== "undefined") {
         rows: picked.map((x, i) => ({ inCash: x.res.cashRatePct, inRoi: x.res.roiPct, oosCash: oosMine[i].cashRatePct, oosRoi: oosMine[i].roiPct, oosCap: oosMine[i].roiCappedPct, oosTrue: oosMine[i].roiUniquePct, oosDup: oosMine[i].dupEst || 0, oosTop1: oosMine[i].top1Pct, oosWin: oosMine[i].winPct, median: oosMine[i].medianRank, best: oosMine[i].bestRank, idx: i })),
         oosCash: avg(oosMine, "cashRatePct"), oosRoi: avg(oosMine, "roiPct"), oosCap: avg(oosMine, "roiCappedPct"), oosTrue: avg(oosMine, "roiUniquePct"), oosTop1: avg(oosMine, "top1Pct"), oosWin: avg(oosMine, "winPct"),
         inCash: avg(picked.map(x => x.res), "cashRatePct"), inRoi: avg(picked.map(x => x.res), "roiPct"), cmp,
-        finalists: finalInfo, breadth: sbs.breadth, srcCounts: picked.reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}), srcPool: [...cands.values()].reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}),
+        finalists: finalInfo, qbRushN: qbR ? qbR.size : 0, breadth: sbs.breadth, srcCounts: picked.reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}), srcPool: [...cands.values()].reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}),
         res: oosMine, contestId: c.id, fieldAvg: fieldAverages(field), oosIters: Math.min(4000, iterations * 3),
       };
     });
@@ -7695,7 +7789,7 @@ if (typeof window !== "undefined") {
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);
     stats.hidden = false;
     stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg top 1%", pctFmt(B.oosTop1)], ["Avg win", pctFmt(B.oosWin)], ["Avg ROI", sg(B.oosRoi) + "%"], ...(B.oosTrue != null ? [["Avg ROI if unique", sg(B.oosTrue) + "%"]] : []), ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
-    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.finalists ? ` Leaders were re-tested twice before the picks were made: the top ${B.finalists.K1 || B.finalists.K} on a second opponent field, then the top ${B.finalists.K} on a third (${B.finalists.runs.toLocaleString()} simulated slates each in total).` : ""}${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps", game: "game stacks" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
+    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.qbRushN ? ` QB props were applied for ${B.qbRushN} quarterback${B.qbRushN === 1 ? "" : "s"}: the more a QB scores by running, the less his pass catchers rise and fall with him.` : ""}${B.finalists ? ` Leaders were re-tested twice before the picks were made: the top ${B.finalists.K1 || B.finalists.K} on a second opponent field, then the top ${B.finalists.K} on a third (${B.finalists.runs.toLocaleString()} simulated slates each in total).` : ""}${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps", game: "game stacks" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
       <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th><th class="n">ROI if unique</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td><td class="n">${B.oosTrue != null ? sg(B.oosTrue) + "%" : "—"}</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td><td class="n">${r.tru != null ? sg(r.tru) + "%" : "—"}</td></tr>`).join("")}</tbody></table></div><div class="simnote"><b>Duplicates:</b> "Dupes" is the expected number of other entries holding that exact lineup. Every ROI here already splits prizes with them; "ROI if unique" is what the lineup would return if nobody else had it, so the gap is what duplication is expected to cost. ${dupModelNote().replace("<b>Duplicates:</b> ", "")}</div>`;
     if (B.res && B.fieldAvg) {
       const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));

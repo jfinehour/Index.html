@@ -2477,7 +2477,7 @@ function showdownSalary(arr) {
 }
 
 function showdownScore(arr, scoreFn) {
-  return arr.reduce((s, p) => s + scoreFn(p) * (p.isCaptain ? 1.5 : 1), 0);
+  return arr.reduce((s, p) => s + scoreFn(p, !!p.isCaptain) * (p.isCaptain ? 1.5 : 1), 0);
 }
 
 /**
@@ -2592,7 +2592,7 @@ function solveExactShowdownOptimal(players, scoreFn, opts = {}) {
   for (const cpt of players) {
     const cptEffectiveSalary = cpt.salary * 1.5;
     if (cptEffectiveSalary > salaryCap) continue;
-    const cptEffectiveScore = scoreFn(cpt) * 1.5;
+    const cptEffectiveScore = scoreFn(cpt, true) * 1.5;
 
     const remainingBudget = salaryCap - cptEffectiveSalary;
     const capBucket = Math.floor(remainingBudget / BUCKET);
@@ -2640,6 +2640,18 @@ function solveExactShowdownOptimal(players, scoreFn, opts = {}) {
  * both teams end up represented. When a build structure is requested
  * (e.g. 4-2 with DET as the 4), a target split is drawn first and each
  * team's head count is enforced slot by slot. */
+/**
+ * Showdown ownership for the slot a player fills. When the projections carry captain ownership, a captain
+ * is as owned as his CPT Own and a FLEX as owned as the rest (total minus captain). Without it, both slots
+ * use total ownership, as before.
+ */
+function slotOwnership(p, field, isCaptain) {
+  const t = p[field] != null && !isNaN(p[field]) ? p[field] : 0;
+  if (p.cptOwn == null || isNaN(p.cptOwn)) return t;
+  const c = Math.min(t, Math.max(0, p.cptOwn));
+  return isCaptain ? c : Math.max(0, t - c);
+}
+
 function buildShowdownLineup(pool, opts) {
   const { scoreFn, rng, noise = 0.15, topK = 5, salaryCap = 50000, minSalary = 0,
           exposure = new Map(), maxExposure = null, structure = null } = opts;
@@ -2660,7 +2672,7 @@ function buildShowdownLineup(pool, opts) {
   }
 
   function weight(p, isCaptain) {
-    let base = scoreFn(p) * (isCaptain ? 1.5 : 1);
+    let base = scoreFn(p, isCaptain) * (isCaptain ? 1.5 : 1); // scoreFn may price the captain slot differently (captain ownership)
     if (maxExposure != null) {
       const usedN = exposure.get(p.name) || 0;
       if (usedN >= maxExposure) base *= 0.25;
@@ -2805,9 +2817,9 @@ function generateShowdownCorrelated(players, n, opts = {}) {
 
   // See the matching comment in generateCorrelatedLineups — boosts only
   // nudge GPP selection, never the real Proj/Ceiling/Floor values.
-  const leverageScore = (p) => {
-    const ownRaw = p[ownershipField];
-    const own = isNaN(ownRaw) ? 0 : ownRaw;
+  // captain slot is discounted by captain ownership, FLEX by flex ownership (when the file has CPT Own)
+  const leverageScore = (p, isCaptain = !!p.isCaptain) => {
+    const own = slotOwnership(p, ownershipField, isCaptain);
     const blended = ceilingWeight * p.ceiling + (1 - ceilingWeight) * p.proj;
     const boost = boosts ? (boosts.get(p.name) || 0) : 0;
     return blended * (1 - (ownershipWeight * own) / 100) * (1 + boost);
@@ -4613,7 +4625,7 @@ const DFSEngine = {
   overlapCount, generateTopN, generateCorrelatedLineups,
   solveExactOptimal, boundedKnapsackTable, convolve, reconstruct, parseVegasLines, swapNeighbors,
   parseOddsApiResponse, nflTeamNameToAbbr, simulateLineups, boxMullerZ, splitNormalFromZ,
-  parsePayoutTable, parseContestEntryCount, payoutForRank, estimateDupes, showdownFieldProb, getDupModel, fitShowdownDupModel, fitClassicDupModel, simulateContestROI, simulateContestROIMulti, makeCorrelatedSampler, buildSyntheticField,
+  parsePayoutTable, parseContestEntryCount, payoutForRank, estimateDupes, showdownFieldProb, getDupModel, fitShowdownDupModel, fitClassicDupModel, simulateContestROI, simulateContestROIMulti, makeCorrelatedSampler, slotOwnership, buildSyntheticField,
   showdownStructureOk, showdownSplitAllowed, buildShowdownScenarioPool,
   buildFieldArchetype, buildShowdownFieldArchetype, weightedRandomPick,
   solveExactShowdownOptimal, buildShowdownLineup, swapShowdownNeighbors, generateShowdownTopN,
@@ -5336,7 +5348,7 @@ if (typeof window !== "undefined") {
       const e = state.edits.get(p.name);
       if (!e) return { ...p };
       const q = { ...p };
-      for (const k of ["proj", "ceiling", "floor", "own", "ownLarge"]) if (e[k] !== undefined) q[k] = e[k];
+      for (const k of ["proj", "ceiling", "floor", "own", "ownLarge", "cptOwn"]) if (e[k] !== undefined) q[k] = e[k];
       return q;
     });
   }
@@ -6064,8 +6076,7 @@ if (typeof window !== "undefined") {
   }
 
   function leverageScorePerPlayer(p, ownField, ownershipWeight, ceilingWeight = 1.0) {
-    const own = p[ownField];
-    const ownVal = (own != null && !isNaN(own)) ? own : 0;
+    const ownVal = eng.slotOwnership(p, ownField, !!p.isCaptain); // Showdown: captain vs FLEX ownership
     const blended = ceilingWeight * p.ceiling + (1 - ceilingWeight) * p.proj;
     return blended * (1 - (ownershipWeight * ownVal) / 100);
   }
@@ -6268,7 +6279,7 @@ if (typeof window !== "undefined") {
     return {
       salary: eng.showdownSalary(arr),
       proj: eng.showdownScore(arr, p => p.proj),
-      own: arr.reduce((s, p) => s + (p[ownField] != null && !isNaN(p[ownField]) ? p[ownField] : 0), 0),
+      own: arr.reduce((s, p) => s + eng.slotOwnership(p, ownField, !!p.isCaptain), 0),
       floor: sumOrNaN(arr, p => p.floor * (p.isCaptain ? 1.5 : 1)),
       ceiling: eng.showdownScore(arr, p => p.ceiling),
     };
@@ -6576,8 +6587,9 @@ if (typeof window !== "undefined") {
   function simBuildNeighbors(arr, isShowdown, poolPlayers, ctx, rng, wide) {
     const inLineup = new Set(arr.map(p => p.id));
     const out = [], seen = new Set();
-    const lev = (q) => q.proj * (1 - 0.5 * ((q.ownLarge || 0) / 100));
+    const ownQ = (q, cap) => isShowdown ? eng.slotOwnership(q, "ownLarge", cap) : (q.ownLarge || 0);
     arr.forEach((p, i) => {
+      const cap = isShowdown && !!p.isCaptain, lev = (q) => q.proj * (1 - 0.5 * (ownQ(q, cap) / 100));
       const elig = poolPlayers.filter(q => !inLineup.has(q.id) && (isShowdown || q.position === p.position || (ctx.flexEligible.has(q.position) && ctx.flexEligible.has(p.position))));
       if (elig.length === 0) return;
       const picks = [];
@@ -6586,7 +6598,7 @@ if (typeof window !== "undefined") {
       const band = elig.filter(q => q.position === p.position && Math.abs(q.salary - p.salary) <= 800);
       band.slice().sort((x, y) => lev(y) - lev(x)).slice(0, 5).forEach(add);
       band.slice().sort((x, y) => y.proj - x.proj).slice(0, 3).forEach(add);
-      band.slice().sort((x, y) => (x.ownLarge || 0) - (y.ownLarge || 0) || y.proj - x.proj).filter(q => q.proj >= 0.6 * p.proj).slice(0, 2).forEach(add);
+      band.slice().sort((x, y) => ownQ(x, cap) - ownQ(y, cap) || y.proj - x.proj).filter(q => q.proj >= 0.6 * p.proj).slice(0, 2).forEach(add);
       // plus the broader leverage leaders and a few random ones
       const byLev = elig.slice().sort((x, y) => lev(y) - lev(x));
       byLev.slice(0, 4).forEach(add);
@@ -7191,8 +7203,10 @@ if (typeof window !== "undefined") {
       if (!e.largeTouched && base.ownLarge === base.own) e.ownLarge = v;
     } else if (field === "ownLarge") {
       e.ownLarge = v; e.largeTouched = true;
+    } else if (field === "cptOwn") {
+      e.cptOwn = v;
     }
-    const same = ["proj", "ceiling", "own", "ownLarge"].every(k => e[k] === undefined || Math.abs(e[k] - base[k]) < 1e-9 || (isNaN(e[k]) && isNaN(base[k])));
+    const same = ["proj", "ceiling", "own", "ownLarge", "cptOwn"].every(k => e[k] === undefined || Math.abs(e[k] - base[k]) < 1e-9 || (isNaN(e[k]) && isNaN(base[k])));
     if (same) state.edits.delete(name); else state.edits.set(name, e);
     plApplyAndRefresh();
   }
@@ -7222,6 +7236,8 @@ if (typeof window !== "undefined") {
     if (!body || !state.players) return;
     const f = state.pl, isSd = state.contestType === "showdown";
     const hasLarge = state.players.some(p => Math.abs((p.ownLarge || 0) - (p.own || 0)) > 0.05);
+    // Showdown files with captain ownership: show it (captain slot uses it, FLEX uses total minus captain)
+    const hasCptCol = isSd && state.players.some(p => p.cptOwn != null && !isNaN(p.cptOwn));
     const q = f.q.trim().toLowerCase();
     const val = (p) => p.salary ? p.proj / (p.salary / 1000) : 0;
     const anyRule = (n) => { const r = ruleOf(n); return !!(r && (r.lock || r.excl || r.min != null || r.max != null)); };
@@ -7232,7 +7248,7 @@ if (typeof window !== "undefined") {
     const get = (p) => f.sortKey === "val" ? val(p) : f.sortKey === "exp" ? expOf(p) : p[f.sortKey];
     rows.sort((x, y) => { const a = get(x), b = get(y); return (typeof a === "string" ? a.localeCompare(b) : (a || 0) - (b || 0)) * f.sortDir; });
     const th = (k, label, num) => `<th class="sortable-th${f.sortKey === k ? " active" : ""}${num ? " num" : ""}" data-pl-sort="${k}">${label}${f.sortKey === k ? (f.sortDir > 0 ? " ▲" : " ▼") : ""}</th>`;
-    head.innerHTML = `<tr><th title="Lock into every lineup / Exclude"></th>${th("name", "Player")}<th>Pos</th>${th("team", "Team")}${th("salary", isSd ? "Salary (FLEX)" : "Salary", 1)}${th("proj", "Proj", 1)}${th("ceiling", "Ceil", 1)}${th("val", "Value", 1)}${th("own", hasLarge ? "Own (Small)" : "Own %", 1)}${hasLarge ? th("ownLarge", "Own (Large)", 1) : ""}<th class="num" title="Selection boost: nudges this player up (+) or down (−) when building lineups. Does not change projections.">Boost %</th><th class="num">Min %</th><th class="num">Max %</th>${th("exp", ex.n ? `Exp (${ex.n})` : "Exp", 1)}<th></th></tr>`;
+    head.innerHTML = `<tr><th title="Lock into every lineup / Exclude"></th>${th("name", "Player")}<th>Pos</th>${th("team", "Team")}${th("salary", isSd ? "Salary (FLEX)" : "Salary", 1)}${th("proj", "Proj", 1)}${th("ceiling", "Ceil", 1)}${th("val", "Value", 1)}${th("own", hasLarge ? "Own (Small)" : "Own %", 1)}${hasLarge ? th("ownLarge", "Own (Large)", 1) : ""}${hasCptCol ? th("cptOwn", "CPT Own", 1) : ""}<th class="num" title="Selection boost: nudges this player up (+) or down (−) when building lineups. Does not change projections.">Boost %</th><th class="num">Min %</th><th class="num">Max %</th>${th("exp", ex.n ? `Exp (${ex.n})` : "Exp", 1)}<th></th></tr>`;
     const inp = (name, field, v, step) => {
       const e = state.edits.get(name), edited = e && e[field] !== undefined && Math.abs(e[field] - plBaseByName(name)[field]) > 1e-9;
       return `<input class="pl-in${edited ? " edited" : ""}" type="number" step="${step}" min="0" data-pl-edit="${field}" data-pl-name="${escapeHtml(name)}" value="${Number.isFinite(v) ? +(+v).toFixed(2) : ""}" aria-label="${field} for ${escapeHtml(name)}">`;
@@ -7246,11 +7262,11 @@ if (typeof window !== "undefined") {
       <td class="num">$${p.salary.toLocaleString()}${isSd ? `<br><span class="tm">CPT $${Math.round(p.salary * 1.5).toLocaleString()}</span>` : ""}</td>
       <td class="num">${inp(p.name, "proj", p.proj, 0.1)}</td><td class="num">${inp(p.name, "ceiling", p.ceiling, 0.1)}</td>
       <td class="num">${val(p).toFixed(2)}</td>
-      <td class="num">${inp(p.name, "own", p.own, 0.5)}</td>${hasLarge ? `<td class="num">${inp(p.name, "ownLarge", p.ownLarge, 0.5)}</td>` : ""}
+      <td class="num">${inp(p.name, "own", p.own, 0.5)}</td>${hasLarge ? `<td class="num">${inp(p.name, "ownLarge", p.ownLarge, 0.5)}</td>` : ""}${hasCptCol ? `<td class="num">${inp(p.name, "cptOwn", p.cptOwn, 0.5)}</td>` : ""}
       <td class="num"><input class="pl-in sm${state.playerBoosts.get(p.name) ? " edited" : ""}" type="number" min="-50" max="50" step="1" placeholder="–" data-pl-boost data-pl-name="${escapeHtml(p.name)}" value="${state.playerBoosts.get(p.name) ? Math.round(state.playerBoosts.get(p.name) * 100) : ""}" aria-label="Boost % for ${escapeHtml(p.name)}"></td><td class="num">${rin(p.name, "min")}</td><td class="num">${rin(p.name, "max")}</td>
       <td class="num">${ex.n ? `<span class="pl-exp"><i style="width:${Math.max(ex.c.get(p.name) ? 2 : 0, expOf(p) * 0.4)}px"></i>${Math.round(expOf(p))}%</span>` : "–"}</td>
       <td>${state.edits.has(p.name) ? `<button type="button" class="pl-undo" data-pl-undo="${escapeHtml(p.name)}" title="Undo edits">↺</button>` : ""}</td></tr>`).join("")
-      : `<tr><td colspan="14" class="empty">No players match these filters.</td></tr>`;
+      : `<tr><td colspan="${14 + (hasLarge ? 1 : 0) + (hasCptCol ? 1 : 0)}" class="empty">No players match these filters.</td></tr>`;
   }
 
   function wireOptimizerView() {

@@ -6795,8 +6795,8 @@ if (typeof window !== "undefined") {
         for (let pp = 0; pp < passes; pp++) {
           if (pp > 0) { statusEl.textContent = `Pass ${pp + 1} of ${passes}…`; await new Promise(r => setTimeout(r, 15)); }
           const r = eng.simulateContestROIMulti(arrs, fields[pp], { ...simBase, seed: 101 + pp + SB });
-          if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes, roiTruePct: x.roiTruePct / passes, winAdjPct: x.winAdjPct / passes, dupEst: x.dupEst / passes, top1Pct: x.top1Pct / passes, top10Pct: (x.top10Pct || 0) / passes, winPct: x.winPct / passes }));
-          else r.forEach((x, i) => { acc[i].top10Pct += (x.top10Pct || 0) / passes; acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; acc[i].roiTruePct += x.roiTruePct / passes; acc[i].winAdjPct += x.winAdjPct / passes; acc[i].dupEst += x.dupEst / passes; acc[i].top1Pct += x.top1Pct / passes; acc[i].winPct += x.winPct / passes; });
+          if (!acc) acc = r.map(x => ({ cashRatePct: x.cashRatePct / passes, roiPct: x.roiPct / passes, roiCappedPct: x.roiCappedPct / passes, roiTruePct: x.roiTruePct / passes, roiUniquePct: (x.roiUniquePct || 0) / passes, winAdjPct: x.winAdjPct / passes, dupEst: x.dupEst / passes, top1Pct: x.top1Pct / passes, top10Pct: (x.top10Pct || 0) / passes, winPct: x.winPct / passes }));
+          else r.forEach((x, i) => { acc[i].top10Pct += (x.top10Pct || 0) / passes; acc[i].cashRatePct += x.cashRatePct / passes; acc[i].roiPct += x.roiPct / passes; acc[i].roiCappedPct += x.roiCappedPct / passes; acc[i].roiTruePct += x.roiTruePct / passes; acc[i].roiUniquePct += (x.roiUniquePct || 0) / passes; acc[i].winAdjPct += x.winAdjPct / passes; acc[i].dupEst += x.dupEst / passes; acc[i].top1Pct += x.top1Pct / passes; acc[i].winPct += x.winPct / passes; });
         }
         return acc;
       };
@@ -6910,10 +6910,11 @@ if (typeof window !== "undefined") {
       const exp = new Map();
       const sharedMax = isShowdown ? 4 : 6;
       const capFor = (p, expCap) => { const r = ruleOf(p.name); if (r && r.max != null) return Math.floor(r.max / 100 * nTarget + 1e-9); if (r && r.lock) return nTarget; return expCap; };
+      const rejected = new Set(); // picks whose combined ROI estimate came out at or below zero
       const pass = (expCap, overlapCap, forName) => {
         for (const x of ranked) {
           if (picked.length >= nTarget) break;
-          if (picked.includes(x)) continue;
+          if (picked.includes(x) || rejected.has(x) || !(x.res && x.res.roiPct > 0)) continue;
           if (forName && !x.arr.some(p => p.name === forName)) continue;
           if (x.arr.some(p => (exp.get(p.id) || 0) >= capFor(p, expCap))) continue;
           const ids = new Set(x.arr.map(p => p.id));
@@ -6944,12 +6945,34 @@ if (typeof window !== "undefined") {
       const oos = eng.simulateContestROIMulti(oosAll, oosField, { ...simBase, iterations: Math.min(4000, iterations * 3), seed: 202 + SB });
       let oosMine = oos.slice(0, mine.length);
       const oosBase = oos.slice(mine.length);
-      // order by everything known about each pick: its search re-tests plus this fresh check
+      // Each pick's best estimate: everything simulated for it (search, re-tests and this fresh check), by slates.
       const itO = Math.min(4000, iterations * 3);
-      const finalScore = picked.map((x, i) => { const w0 = x.w || iterations * passes, o = {}; for (const k of MERGE_KEYS) o[k] = ((x.res[k] || 0) * w0 + (oosMine[i][k] || 0) * itO) / (w0 + itO); return scorer(o); });
+      const mergeOf = (x, f) => { const w0 = x.w || iterations * passes, o = {}; for (const k of MERGE_KEYS) o[k] = ((x.res[k] || 0) * w0 + (f[k] || 0) * itO) / (w0 + itO); return o; };
+      let best = picked.map((x, i) => mergeOf(x, oosMine[i]));
+      // No pick may have a non-positive best estimate: drop those, fill from the next candidates that pass the
+      // same exposure / overlap rules, give the newcomers their own fresh check, and repeat.
+      let replaced = 0;
+      for (let round = 0; round < 4; round++) {
+        const bad = picked.map((x, i) => i).filter(i => !(best[i].roiPct > 0));
+        if (!bad.length) break;
+        for (const i of bad.sort((a, b) => b - a)) {
+          const x = picked[i]; rejected.add(x); x.arr.forEach(p => exp.set(p.id, (exp.get(p.id) || 1) - 1));
+          picked.splice(i, 1); oosMine.splice(i, 1); best.splice(i, 1);
+        }
+        const before = picked.length;
+        pass(cap0, sharedMax); pass(cap0, sharedMax + 1); pass(Math.ceil(cap0 * 1.3), sharedMax + 2); pass(nTarget, sharedMax + 3);
+        const added = picked.slice(before);
+        if (!added.length) break;
+        replaced += added.length;
+        const addArrs = added.map(x => simArr(x.arr));
+        const r2 = eng.simulateContestROIMulti(addArrs, oosField, { ...simBase, iterations: itO, seed: 230 + round + SB });
+        added.forEach((x, k) => { oosMine.push(r2[k]); best.push(mergeOf(x, r2[k])); });
+      }
+      // order by the best estimate
+      const finalScore = best.map(o => scorer(o));
       const order = picked.map((_, i) => i).sort((i, j) => finalScore[j] - finalScore[i]);
       picked.splice(0, picked.length, ...order.map(i => picked[i]));
-      oosMine = order.map(i => oosMine[i]);
+      oosMine = order.map(i => oosMine[i]); best = order.map(i => best[i]);
       const avg = (rs, k) => rs.length ? rs.reduce((s, r) => s + r[k], 0) / rs.length : null;
       // existing buckets split for the comparison table
       const sizes = [["Projection", (state.results.proj || []).length], ["Ceiling", (state.results.ceil || []).length], ["Small Field", (state.results.small || []).length], ["Large Field", (state.results.large || []).length]];
@@ -6958,7 +6981,8 @@ if (typeof window !== "undefined") {
       state.results.sim = picked.map(x => x.arr);
       state.simBuilt = {
         metric, evaluated: cands.size, count: picked.length, contest: c.label,
-        rows: picked.map((x, i) => ({ inCash: x.res.cashRatePct, inRoi: x.res.roiPct, oosCash: oosMine[i].cashRatePct, oosRoi: oosMine[i].roiPct, oosCap: oosMine[i].roiCappedPct, oosTrue: oosMine[i].roiUniquePct, oosDup: oosMine[i].dupEst || 0, oosTop1: oosMine[i].top1Pct, oosWin: oosMine[i].winPct, median: oosMine[i].medianRank, best: oosMine[i].bestRank, idx: i })),
+        rows: picked.map((x, i) => ({ inCash: x.res.cashRatePct, inRoi: x.res.roiPct, oosCash: best[i].cashRatePct, oosRoi: best[i].roiPct, oosCap: best[i].roiCappedPct, oosTrue: best[i].roiUniquePct, oosDup: best[i].dupEst || 0, oosTop1: best[i].top1Pct, oosWin: best[i].winPct, fresh: oosMine[i].roiPct, slates: (x.w || iterations * passes) + itO, median: oosMine[i].medianRank, best: oosMine[i].bestRank, idx: i })),
+        bestCash: avg(best, "cashRatePct"), bestTop1: avg(best, "top1Pct"), bestWin: avg(best, "winPct"), bestRoi: avg(best, "roiPct"), bestTrue: avg(best, "roiUniquePct"), replaced, short: Math.max(0, nTarget - picked.length),
         oosCash: avg(oosMine, "cashRatePct"), oosRoi: avg(oosMine, "roiPct"), oosCap: avg(oosMine, "roiCappedPct"), oosTrue: avg(oosMine, "roiUniquePct"), oosTop1: avg(oosMine, "top1Pct"), oosWin: avg(oosMine, "winPct"),
         inCash: avg(picked.map(x => x.res), "cashRatePct"), inRoi: avg(picked.map(x => x.res), "roiPct"), cmp,
         finalists: finalInfo, qbRushN: qbR ? qbR.size : 0, breadth: sbs.breadth, srcCounts: picked.reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}), srcPool: [...cands.values()].reduce((m, x) => { m[x.src || "base"] = (m[x.src || "base"] || 0) + 1; return m; }, {}),
@@ -7804,8 +7828,9 @@ if (typeof window !== "undefined") {
     }
     const sd = state.contestType === "showdown", f = (v) => v == null ? "—" : fmtNum(v), sg = (v) => (v >= 0 ? "+" : "") + f(v);
     stats.hidden = false;
-    stats.innerHTML = [["Avg cash", pctFmt(B.oosCash)], ["Avg top 1%", pctFmt(B.oosTop1)], ["Avg win", pctFmt(B.oosWin)], ["Avg ROI", sg(B.oosRoi) + "%"], ...(B.oosTrue != null ? [["Avg ROI if unique", sg(B.oosTrue) + "%"]] : []), ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
-    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in. Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.qbRushN ? ` QB props were applied for ${B.qbRushN} quarterback${B.qbRushN === 1 ? "" : "s"}: the more a QB scores by running, the less his pass catchers rise and fall with him.` : ""}${B.finalists ? ` Leaders were re-tested twice before the picks were made: the top ${B.finalists.K1 || B.finalists.K} on a second opponent field, then the top ${B.finalists.K} on a third (${B.finalists.runs.toLocaleString()} simulated slates each in total).` : ""}${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps", game: "game stacks" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
+    const hasBest = B.bestRoi != null;
+    stats.innerHTML = [["Avg cash", pctFmt(hasBest ? B.bestCash : B.oosCash)], ["Avg top 1%", pctFmt(hasBest ? B.bestTop1 : B.oosTop1)], ["Avg win", pctFmt(hasBest ? B.bestWin : B.oosWin)], ["Avg ROI", sg(hasBest ? B.bestRoi : B.oosRoi) + "%"], ...(hasBest ? [["Fresh-check ROI", sg(B.oosRoi) + "%"]] : []), ...((hasBest ? B.bestTrue : B.oosTrue) != null ? [["Avg ROI if unique", sg(hasBest ? B.bestTrue : B.oosTrue) + "%"]] : []), ["Lineups", B.count]].map(([t, v]) => `<div class="stat"><span>${t}</span><b>${v}</b></div>`).join("");
+    note.innerHTML = `<div class="simnote"><b>Optimized for:</b> ${{ cash: "cash rate", top1: "top 1% rate", win: "win rate", roi: "ROI", true: "True ROI (uncapped, duplicates split prizes)", winAdj: "win rate (duplicate-adjusted)" }[B.metric] || "ROI"} in <b>${escapeHtml(B.contest || "the first contest")}</b>. ${B.bestRoi != null ? `Each lineup's numbers combine every slate it was simulated on (${(B.rows[0] && B.rows[0].slates || 0).toLocaleString()} or more): the search, its re-tests and a final <b>fresh check</b> on new slates that played no part in picking it. Any lineup whose combined ROI came out at zero or below was replaced${B.replaced ? ` (${B.replaced} replacement${B.replaced === 1 ? "" : "s"} this run)` : " (none needed this run)"}${B.short ? `; ${B.short} slot${B.short === 1 ? "" : "s"} could not be filled with a positive lineup under your exposure rules` : ""}. The fresh check alone is the least biased figure, so the "Fresh check" column and tile are shown too: lineups chosen because they simulated well will tend to come in lower on new slates, and one lineup's ROI swings a lot because it rests on a few big finishes.` : `Every number below comes from a <b>fresh simulation</b> (new random slates, 3× the runs) that did not pick these lineups; the search itself saw an average cash rate of ${pctFmt(B.inCash)}, so the gap to ${pctFmt(B.oosCash)} is the luck that selection baked in.`} Searching a model finds its blind spots as readily as real edges, so treat ROI with suspicion.${B.qbRushN ? ` QB props were applied for ${B.qbRushN} quarterback${B.qbRushN === 1 ? "" : "s"}: the more a QB scores by running, the less his pass catchers rise and fall with him.` : ""}${B.finalists ? ` Leaders were re-tested twice before the picks were made: the top ${B.finalists.K1 || B.finalists.K} on a second opponent field, then the top ${B.finalists.K} on a third (${B.finalists.runs.toLocaleString()} simulated slates each in total).` : ""}${B.breadth === "wide" && B.srcCounts ? (() => { const L = { base: "standard builds", swap: "swaps", random: "random-weight builds", contrarian: "contrarian stacks", optimal: "sim-optimal seeds", guided: "sim-guided builds", wideswap: "wide swaps", game: "game stacks" }; const off = (B.srcCounts.random || 0) + (B.srcCounts.contrarian || 0) + (B.srcCounts.optimal || 0) + (B.srcCounts.guided || 0) + (B.srcCounts.wideswap || 0); return `<br><b>Wide search:</b> ${off} of ${B.count} picks came from off-the-board sources (` + Object.entries(B.srcCounts).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `), from ${B.evaluated.toLocaleString()} candidates scored (` + Object.entries(B.srcPool || {}).map(([k, v]) => `${v} ${L[k] || k}`).join(", ") + `).`; })() : ""}</div>
       <div style="overflow-x:auto"><table class="plain"><thead><tr><th>Same fresh slates, all buckets</th><th class="n">Avg cash</th><th class="n">Top 1%</th><th class="n">Win</th><th class="n">ROI</th><th class="n">ROI if unique</th></tr></thead><tbody><tr style="font-weight:600"><td>Sim-Built</td><td class="n">${pctFmt(B.oosCash)}</td><td class="n">${pctFmt(B.oosTop1)}</td><td class="n">${pctFmt(B.oosWin)}</td><td class="n">${sg(B.oosRoi)}%</td><td class="n">${B.oosTrue != null ? sg(B.oosTrue) + "%" : "—"}</td></tr>${B.cmp.map(r => `<tr><td>${escapeHtml(r.name)}</td><td class="n">${pctFmt(r.cash)}</td><td class="n">${pctFmt(r.top1)}</td><td class="n">${pctFmt(r.win)}</td><td class="n">${sg(r.roi)}%</td><td class="n">${r.tru != null ? sg(r.tru) + "%" : "—"}</td></tr>`).join("")}</tbody></table></div><div class="simnote"><b>Duplicates:</b> "Dupes" is the expected number of other entries holding that exact lineup. Every ROI here already splits prizes with them; "ROI if unique" is what the lineup would return if nobody else had it, so the gap is what duplication is expected to cost. ${dupModelNote().replace("<b>Duplicates:</b> ", "")}</div>`;
     if (B.res && B.fieldAvg) {
       const dr = B.res.map((x, i) => ({ arr: state.results.sim[i], proj: lineupProj(state.results.sim[i]), c: [x] }));
@@ -7819,8 +7844,8 @@ if (typeof window !== "undefined") {
     const key = state.sbSort || "idx";
     rows.sort((x, y) => key === "idx" ? x.idx - y.idx : key === "median" ? x.median - y.median : y[key] - x[key]);
     const th = (k, t, n = true) => `<th class="sortable${n ? " n" : ""}" data-k="${k}"${key === k ? ' data-dir="▼"' : ""}>${t}</th>`;
-    body.innerHTML = `<table class="simt"><thead><tr>${th("idx", "#", false)}<th></th><th>Lineup</th>${th("oosCash", "Cash")}${th("oosTop1", "Top 1%")}${th("oosWin", "Win")}${th("oosRoi", "ROI")}${th("oosTrue", "ROI if unique")}${th("oosDup", "Dupes")}${th("median", "Median rank")}<th class="n">Best rank</th></tr></thead><tbody>` +
-      rows.map(r => `<tr><td class="rank">${String(r.idx + 1).padStart(3, "0")}</td><td><button class="why-btn" data-whyb="${r.idx}" aria-expanded="${state.whyOpenB === r.idx}">Why</button></td><td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="Sim-Built|${r.idx + 1}">Sim-Built #${r.idx + 1}</a>${namesOf(orderForNames(r.arr, sd))}</td><td class="n">${pctFmt(r.oosCash)}</td><td class="n">${pctFmt(r.oosTop1)}</td><td class="n">${pctFmt(r.oosWin)}</td><td class="n">${roiCell(r.oosRoi)}</td><td class="n">${r.oosTrue != null ? roiCell(r.oosTrue) : "—"}</td><td class="n" title="Estimated number of other entries with this exact lineup">${r.oosDup != null ? (r.oosDup < 0.005 ? "<0.01" : r.oosDup.toFixed(2)) : "—"}</td><td class="n">${r.median.toLocaleString()}</td><td class="n">${r.best.toLocaleString()}</td></tr>` + (state.whyOpenB === r.idx && B.res ? `<tr class="why-row"><td colspan="11">${whyHTML(whyR, { arr: r.arr, proj: lineupProj(r.arr), c: [B.res[r.idx]] })}</td></tr>` : "")).join("") + "</tbody></table>";
+    body.innerHTML = `<table class="simt"><thead><tr>${th("idx", "#", false)}<th></th><th>Lineup</th>${th("oosCash", "Cash")}${th("oosTop1", "Top 1%")}${th("oosWin", "Win")}${th("oosRoi", "ROI")}${B.bestRoi != null ? th("fresh", "Fresh check") : ""}${th("oosTrue", "ROI if unique")}${th("oosDup", "Dupes")}${th("median", "Median rank")}<th class="n">Best rank</th></tr></thead><tbody>` +
+      rows.map(r => `<tr><td class="rank">${String(r.idx + 1).padStart(3, "0")}</td><td><button class="why-btn" data-whyb="${r.idx}" aria-expanded="${state.whyOpenB === r.idx}">Why</button></td><td class="lnames"><a href="#" class="lineup-link" data-lineup-ref="Sim-Built|${r.idx + 1}">Sim-Built #${r.idx + 1}</a>${namesOf(orderForNames(r.arr, sd))}</td><td class="n">${pctFmt(r.oosCash)}</td><td class="n">${pctFmt(r.oosTop1)}</td><td class="n">${pctFmt(r.oosWin)}</td><td class="n">${roiCell(r.oosRoi)}</td>${B.bestRoi != null ? `<td class="n" title="ROI on the final fresh slates alone">${r.fresh != null ? roiCell(r.fresh) : "—"}</td>` : ""}<td class="n">${r.oosTrue != null ? roiCell(r.oosTrue) : "—"}</td><td class="n" title="Estimated number of other entries with this exact lineup">${r.oosDup != null ? (r.oosDup < 0.005 ? "<0.01" : r.oosDup.toFixed(2)) : "—"}</td><td class="n">${r.median.toLocaleString()}</td><td class="n">${r.best.toLocaleString()}</td></tr>` + (state.whyOpenB === r.idx && B.res ? `<tr class="why-row"><td colspan="${B.bestRoi != null ? 12 : 11}">${whyHTML(whyR, { arr: r.arr, proj: lineupProj(r.arr), c: [B.res[r.idx]] })}</td></tr>` : "")).join("") + "</tbody></table>";
     foot.hidden = false;
     foot.innerHTML = `<span class="meta">Sim-built lineups are on the Lineups tab as their own set, ready to export.</span><button class="btn primary" id="viewBuilt">View on Lineups tab</button>`;
     $("viewBuilt").onclick = () => { state.resType = "sim"; state.resultsSite = siteKey(); state.view = "lines"; render(); window.scrollTo({ top: 0 }); };
